@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { createRoot } from 'react-dom/client';
 import { 
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, Legend, ResponsiveContainer, 
@@ -7,7 +7,7 @@ import {
 import { 
   Plus, Trash2, Edit2, CheckCircle, AlertCircle, TrendingUp, DollarSign, 
   PieChart as PieIcon, FileText, BrainCircuit, X, Save, Calendar, Landmark,
-  Search, Filter, RefreshCw, ArrowUpRight, Info, ChevronDown, ChevronUp, Clock, Calculator, Wallet, Bell, FilePenLine, CalendarDays, Loader2
+  Search, Filter, RefreshCw, ArrowUpRight, Info, ChevronDown, ChevronUp, Clock, Calculator, Wallet, Bell, FilePenLine, CalendarDays, Loader2, FileUp, CheckCheck, AlertTriangle, Percent, Download
 } from 'lucide-react';
 import { GoogleGenAI } from "@google/genai";
 import { createClient } from '@supabase/supabase-js';
@@ -18,9 +18,21 @@ const SUPABASE_KEY = 'sb_publishable_dPcP59CFidQ5Ha5hTwwXHA_nLvc5b8p';
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
+// --- Constants & Market Data Simulation ---
+const MARKET_RATES = {
+    'CDI': 10.40,  // Estimativa anual
+    'SELIC': 10.50,
+    'IPCA': 4.50,
+    'IGPM': 4.00,
+    'TR': 0.00,
+    'PREFIXADO': 0.00
+};
+
 // --- Types ---
 
 type ContractStatus = 'pending' | 'paid' | 'partial';
+type CapitalizationPeriod = 'daily' | 'monthly' | 'semiannual' | 'annual';
+type InterestMethod = 'compound' | 'simple';
 
 interface Payment {
   id: string;
@@ -41,7 +53,8 @@ interface Contract {
   paidAmount: number;
   payments?: Payment[];
   indexName: string; 
-  annualRate: number; 
+  annualRate: number; // Spread ou Taxa Fixa
+  capitalizationPeriod: CapitalizationPeriod;
   status: ContractStatus;
 }
 
@@ -51,63 +64,138 @@ const formatCurrency = (value: number) => {
 
 const formatDate = (dateString: string) => {
   if (!dateString) return '-';
-  // Ajuste para timezone local para evitar problemas de exibição de data off-by-one
+  const parts = dateString.split('-');
+  if (parts.length === 3) {
+      return `${parts[2]}/${parts[1]}/${parts[0]}`;
+  }
   const date = new Date(dateString);
   return new Intl.DateTimeFormat('pt-BR', { timeZone: 'UTC' }).format(date);
 };
 
-const calculateProjection = (contract: Contract) => {
-    // Lógica Financeira: Juros Compostos com Capitalização Mensal
-    
-    // Recalcular paidAmount baseado nos pagamentos atuais para garantir consistência
-    const realPaidAmount = contract.payments?.reduce((acc, p) => acc + p.amount, 0) || 0;
+const getIndexRate = (indexName: string): number => {
+    if (indexName.includes('CDI')) return MARKET_RATES.CDI;
+    if (indexName.includes('Selic')) return MARKET_RATES.SELIC;
+    if (indexName.includes('IPCA')) return MARKET_RATES.IPCA;
+    if (indexName.includes('IGPM')) return MARKET_RATES.IGPM;
+    return 0;
+};
 
-    const today = new Date();
-    const issue = new Date(contract.issueDate);
-    
-    // Se a data de emissão for inválida
-    if (isNaN(issue.getTime())) {
+// Helper para categorizar operação baseado na descrição
+const getOperationCategory = (description: string): string => {
+    const lower = description.toLowerCase();
+    if (lower.includes('custeio')) return 'Custeio';
+    if (lower.includes('maquinário') || lower.includes('maquinario') || lower.includes('trator') || lower.includes('colheitadeira') || lower.includes('veículo')) return 'Maquinário';
+    if (lower.includes('solo') || lower.includes('recuperação') || lower.includes('correção')) return 'Recuperação de Solo';
+    if (lower.includes('giro')) return 'Capital de Giro';
+    if (lower.includes('galpão') || lower.includes('silo') || lower.includes('armazém') || lower.includes('construção') || lower.includes('expansão') || lower.includes('benfeitoria')) return 'Infraestrutura';
+    if (lower.includes('investimento')) return 'Investimento';
+    return 'Outros';
+};
+
+// --- Helper: Date Normalization to avoid Timezone/Time of Day floating point errors ---
+const toMidnightUTC = (dateInput: string | Date | number): number => {
+    const d = new Date(dateInput);
+    // Cria uma data UTC zerada (meio-dia UTC para evitar problemas de DST)
+    return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), 12, 0, 0, 0);
+};
+
+// --- Financial Core Logic ---
+const calculateProjection = (contract: Contract, interestMethod: InterestMethod = 'compound') => {
+    const estimatedIndexRate = getIndexRate(contract.indexName);
+    const totalAnnualRatePercent = estimatedIndexRate + contract.annualRate;
+    const totalAnnualRateDecimal = totalAnnualRatePercent / 100;
+
+    // Normalize issue date to Midnight UTC
+    const issueDateStr = contract.issueDate;
+    if (!issueDateStr) {
         return { 
             projectedTotal: contract.amount, 
-            currentDebt: Math.max(0, contract.amount - realPaidAmount), 
+            currentDebt: contract.amount, 
             interestAccrued: 0,
             daysElapsed: 0,
-            monthsElapsed: 0,
-            monthlyRate: 0
+            totalAnnualRatePercent,
+            estimatedIndexRate
         };
     }
-
-    // 1. Cálculo do Tempo (Dias e Meses)
-    const diffTime = Math.max(0, today.getTime() - issue.getTime());
-    const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24));
-    const diffMonths = diffDays / (365 / 12); 
-
-    // 2. Conversão da Taxa Anual para Taxa Mensal Efetiva
-    const annualRateDecimal = (contract.annualRate || 0) / 100;
-    const monthlyRateDecimal = Math.pow(1 + annualRateDecimal, 1 / 12) - 1;
-
-    // 3. Aplicação dos Juros Compostos
-    const compoundFactor = Math.pow(1 + monthlyRateDecimal, diffMonths);
-    const projectedTotal = contract.amount * compoundFactor;
     
-    // 4. Saldo Devedor
-    // Se o status for pago, forçamos zero, senão calculamos
-    let currentDebt = 0;
+    const issueDateUTC = toMidnightUTC(issueDateStr);
+    const todayUTC = toMidnightUTC(new Date());
+
+    // Taxa Diária (Daily Rate) - Base 365
+    // Composto: (1 + i_ano)^(1/365) - 1
+    // Simples: i_ano / 365
+    const dailyRateCompound = Math.pow(1 + totalAnnualRateDecimal, 1 / 365) - 1;
+    const dailyRateSimple = totalAnnualRateDecimal / 365;
     
-    // Verifica se já está tecnicamente quitado (com margem de erro pequena para float)
-    if (realPaidAmount >= (projectedTotal - 1)) {
-       currentDebt = 0;
+    // Sort payments chronologically
+    const sortedPayments = [...(contract.payments || [])].sort((a, b) => 
+        new Date(a.date).getTime() - new Date(b.date).getTime()
+    );
+
+    let currentBalance = contract.amount;
+    let lastDateUTC = issueDateUTC;
+    let totalPaidNominal = 0;
+
+    // Process payments (Amortization timeline)
+    for (const payment of sortedPayments) {
+        const payDateUTC = toMidnightUTC(payment.date);
+        
+        // Skip invalid dates or payments before issue (sanity check)
+        if (payDateUTC < issueDateUTC) continue;
+        
+        // Calculate INTEGER days between events
+        const msPerDay = 1000 * 3600 * 24;
+        const daysBetween = Math.max(0, Math.floor((payDateUTC - lastDateUTC) / msPerDay));
+        
+        // Apply Interest for the period
+        if (currentBalance > 0 && daysBetween > 0) {
+            if (interestMethod === 'compound') {
+                const factor = Math.pow(1 + dailyRateCompound, daysBetween);
+                currentBalance = currentBalance * factor;
+            } else {
+                currentBalance = currentBalance * (1 + (dailyRateSimple * daysBetween));
+            }
+        }
+
+        // Subtract Payment
+        currentBalance -= payment.amount;
+        if (currentBalance < 0) currentBalance = 0; // Prevent negative debt (overpaid)
+
+        totalPaidNominal += payment.amount;
+        lastDateUTC = payDateUTC;
+    }
+
+    // Apply Interest from Last Event (Payment or Issue) to Today
+    const msPerDay = 1000 * 3600 * 24;
+    const daysToNow = Math.max(0, Math.floor((todayUTC - lastDateUTC) / msPerDay));
+    
+    // Only apply interest if debt remains
+    if (currentBalance > 0 && daysToNow > 0) {
+         if (interestMethod === 'compound') {
+            const factor = Math.pow(1 + dailyRateCompound, daysToNow);
+            currentBalance = currentBalance * factor;
+        } else {
+            currentBalance = currentBalance * (1 + (dailyRateSimple * daysToNow));
+        }
+    }
+
+    // Theoretical Projected Total (If no payments were made)
+    const totalDays = Math.max(0, Math.floor((todayUTC - issueDateUTC) / msPerDay));
+    let projectedTotalNoPayments = contract.amount;
+    if (interestMethod === 'compound') {
+         projectedTotalNoPayments = contract.amount * Math.pow(1 + dailyRateCompound, totalDays);
     } else {
-       currentDebt = Math.max(0, projectedTotal - realPaidAmount);
+         projectedTotalNoPayments = contract.amount * (1 + (dailyRateSimple * totalDays));
     }
 
     return {
-        projectedTotal,
-        currentDebt,
-        interestAccrued: projectedTotal - contract.amount,
-        daysElapsed: diffDays,
-        monthsElapsed: diffMonths,
-        monthlyRate: monthlyRateDecimal * 100 
+        projectedTotal: projectedTotalNoPayments,
+        currentDebt: currentBalance,
+        interestAccrued: Math.max(0, currentBalance - (contract.amount - totalPaidNominal)), // Approximation of interest component
+        daysElapsed: totalDays,
+        totalAnnualRatePercent,
+        estimatedIndexRate,
+        dailyRateUsed: interestMethod === 'compound' ? dailyRateCompound : dailyRateSimple
     };
 };
 
@@ -131,20 +219,41 @@ const StatCard = ({ title, value, icon: Icon, colorClass, subtext, highlight = f
 const FilterBar = ({ 
     filters, 
     setFilters, 
-    banks 
+    banks,
+    operationTypes,
+    interestMethod,
+    setInterestMethod
 }: { 
     filters: any, 
     setFilters: any, 
-    banks: string[] 
+    banks: string[],
+    operationTypes: string[],
+    interestMethod: InterestMethod,
+    setInterestMethod: (m: InterestMethod) => void
 }) => {
     return (
         <div className="bg-white p-4 rounded-xl shadow-sm border border-slate-200 mb-6 flex flex-col xl:flex-row gap-4 items-start xl:items-center">
-            <div className="flex items-center gap-2 text-slate-500 font-medium mr-2 min-w-fit self-center xl:self-auto">
-                <Filter size={20} /> Filtros:
-            </div>
             
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3 w-full">
-                <div className="relative w-full">
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-6 gap-3 w-full items-center">
+                 {/* Interest Toggle */}
+                <div className="flex items-center gap-2 bg-slate-50 p-1.5 rounded-lg border border-slate-200 col-span-1 md:col-span-2 lg:col-span-1 justify-center">
+                    <button
+                        onClick={() => setInterestMethod('compound')}
+                        className={`flex-1 px-3 py-1.5 rounded text-xs font-medium transition-colors flex items-center justify-center gap-1 ${interestMethod === 'compound' ? 'bg-white text-emerald-700 shadow-sm border border-slate-100' : 'text-slate-400 hover:text-slate-600'}`}
+                        title="Juros Compostos (Padrão de Mercado)"
+                    >
+                        <TrendingUp size={14} /> Comp.
+                    </button>
+                    <button
+                        onClick={() => setInterestMethod('simple')}
+                        className={`flex-1 px-3 py-1.5 rounded text-xs font-medium transition-colors flex items-center justify-center gap-1 ${interestMethod === 'simple' ? 'bg-white text-blue-700 shadow-sm border border-slate-100' : 'text-slate-400 hover:text-slate-600'}`}
+                         title="Juros Simples (Linear)"
+                    >
+                        <Percent size={14} /> Simp.
+                    </button>
+                </div>
+
+                <div className="relative w-full lg:col-span-2">
                     <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
                     <input 
                         type="text" 
@@ -155,38 +264,21 @@ const FilterBar = ({
                     />
                 </div>
 
-                <div className="flex gap-2">
-                    <div className="relative w-full">
-                        <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none">
-                            <CalendarDays size={16} />
-                        </span>
-                        <input 
-                            type="date"
-                            placeholder="De"
-                            className="w-full pl-9 pr-2 py-2 rounded-lg border border-slate-300 focus:ring-2 focus:ring-emerald-500 focus:outline-none text-sm text-slate-600"
-                            value={filters.dateStart}
-                            onChange={(e) => setFilters({...filters, dateStart: e.target.value})}
-                            title="Vencimento a partir de"
-                        />
-                    </div>
-                    <div className="relative w-full">
-                        <input 
-                            type="date"
-                            placeholder="Até"
-                            className="w-full px-3 py-2 rounded-lg border border-slate-300 focus:ring-2 focus:ring-emerald-500 focus:outline-none text-sm text-slate-600"
-                            value={filters.dateEnd}
-                            onChange={(e) => setFilters({...filters, dateEnd: e.target.value})}
-                            title="Vencimento até"
-                        />
-                    </div>
-                </div>
+                <select 
+                    className="w-full py-2 px-3 rounded-lg border border-slate-300 focus:ring-2 focus:ring-emerald-500 focus:outline-none bg-white text-slate-700"
+                    value={filters.operationType}
+                    onChange={(e) => setFilters({...filters, operationType: e.target.value})}
+                >
+                    <option value="all">Tipos (Todos)</option>
+                    {operationTypes.map(op => <option key={op} value={op}>{op}</option>)}
+                </select>
 
                 <select 
                     className="w-full py-2 px-3 rounded-lg border border-slate-300 focus:ring-2 focus:ring-emerald-500 focus:outline-none bg-white text-slate-700"
                     value={filters.bank}
                     onChange={(e) => setFilters({...filters, bank: e.target.value})}
                 >
-                    <option value="all">Todos os Bancos</option>
+                    <option value="all">Bancos (Todos)</option>
                     {banks.map(b => <option key={b} value={b}>{b}</option>)}
                 </select>
 
@@ -196,7 +288,7 @@ const FilterBar = ({
                         value={filters.status}
                         onChange={(e) => setFilters({...filters, status: e.target.value})}
                     >
-                        <option value="all">Todos os Status</option>
+                        <option value="all">Status</option>
                         <option value="pending">Pendente</option>
                         <option value="partial">Parcial</option>
                         <option value="paid">Pago</option>
@@ -204,7 +296,7 @@ const FilterBar = ({
                     </select>
 
                     <button 
-                        onClick={() => setFilters({ search: '', bank: 'all', status: 'all', dateStart: '', dateEnd: '' })}
+                        onClick={() => setFilters({ search: '', bank: 'all', status: 'all', operationType: 'all', dateStart: '', dateEnd: '' })}
                         className="p-2 text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-lg transition-colors flex-shrink-0"
                         title="Limpar Filtros"
                     >
@@ -231,21 +323,21 @@ const ContractModal = ({
 }) => {
   const [formData, setFormData] = useState<Partial<Contract>>({
     bank: '', contractNumber: '', description: '', issueDate: '', dueDate: '', 
-    amount: 0, paidAmount: 0, payments: [], indexName: 'Prefixado', annualRate: 0, status: 'pending'
+    amount: 0, paidAmount: 0, payments: [], indexName: 'Prefixado', annualRate: 0, status: 'pending', capitalizationPeriod: 'monthly'
   });
 
   useEffect(() => {
     if (initialData) {
       setFormData({
           ...initialData,
-          // Garante formato de data correto para o input YYYY-MM-DD
           issueDate: initialData.issueDate ? initialData.issueDate.split('T')[0] : '',
-          dueDate: initialData.dueDate ? initialData.dueDate.split('T')[0] : ''
+          dueDate: initialData.dueDate ? initialData.dueDate.split('T')[0] : '',
+          capitalizationPeriod: 'monthly' // Default internal, not displayed
       });
     } else {
       setFormData({
         bank: '', contractNumber: '', description: '', issueDate: '', dueDate: '', 
-        amount: 0, paidAmount: 0, payments: [], indexName: 'Prefixado', annualRate: 0, status: 'pending'
+        amount: 0, paidAmount: 0, payments: [], indexName: 'Prefixado', annualRate: 0, status: 'pending', capitalizationPeriod: 'monthly'
       });
     }
   }, [initialData, isOpen]);
@@ -256,6 +348,9 @@ const ContractModal = ({
     e.preventDefault();
     onSave(formData);
   };
+
+  const estimatedIndex = getIndexRate(formData.indexName || 'Prefixado');
+  const totalEstimatedRate = estimatedIndex + (formData.annualRate || 0);
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
@@ -318,7 +413,6 @@ const ContractModal = ({
                 />
             </div>
             <div>
-                {/* Nota: PaidAmount agora é calculado, mas mantemos aqui para inicialização manual se necessário ou visualização */}
                 <label className="block text-sm font-medium text-slate-400 mb-1">Valor Já Pago (Automático)</label>
                 <input 
                 type="number" 
@@ -349,36 +443,52 @@ const ContractModal = ({
             </div>
           </div>
 
-          <div className="col-span-2 grid grid-cols-2 gap-4 bg-slate-50 p-4 rounded-lg border border-slate-100">
-             <h3 className="col-span-2 text-sm font-semibold text-slate-800 flex items-center gap-2">
-                <TrendingUp size={16} className="text-emerald-600"/> Indexador (Para Projeção)
+          <div className="col-span-2 bg-slate-50 p-4 rounded-lg border border-slate-100">
+             <h3 className="text-sm font-semibold text-slate-800 flex items-center gap-2 mb-3">
+                <TrendingUp size={16} className="text-emerald-600"/> Taxas e Indexadores
             </h3>
-            <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1">Índice</label>
-                <select 
-                    className="w-full rounded-lg border-slate-300 border p-2 focus:ring-2 focus:ring-emerald-500 focus:outline-none"
-                    value={formData.indexName}
-                    onChange={e => setFormData({...formData, indexName: e.target.value})}
-                >
-                    <option value="Prefixado">Prefixado</option>
-                    <option value="CDI +">CDI +</option>
-                    <option value="IPCA +">IPCA +</option>
-                    <option value="IGPM +">IGPM +</option>
-                    <option value="Selic +">Selic +</option>
-                </select>
-            </div>
-            <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1">Taxa Anual Estimada (%)</label>
-                <div className="relative">
-                    <input 
-                    type="number" 
-                    step="0.01"
-                    className="w-full rounded-lg border-slate-300 border p-2 focus:ring-2 focus:ring-emerald-500 focus:outline-none pr-8"
-                    value={formData.annualRate}
-                    onChange={e => setFormData({...formData, annualRate: Number(e.target.value)})}
-                    placeholder="Ex: 12.5"
-                    />
-                    <span className="absolute right-3 top-2 text-slate-400 text-sm">%</span>
+            <div className="grid grid-cols-2 gap-4">
+                <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">Índice Base</label>
+                    <select 
+                        required
+                        className="w-full rounded-lg border-slate-300 border p-2 focus:ring-2 focus:ring-emerald-500 focus:outline-none"
+                        value={formData.indexName}
+                        onChange={e => setFormData({...formData, indexName: e.target.value})}
+                    >
+                        <option value="Prefixado">Prefixado (Sem Índice)</option>
+                        <option value="CDI +">CDI +</option>
+                        <option value="IPCA +">IPCA +</option>
+                        <option value="IGPM +">IGPM +</option>
+                        <option value="Selic +">Selic +</option>
+                    </select>
+                </div>
+                <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">
+                        {formData.indexName === 'Prefixado' ? 'Taxa Anual Fixa (%)' : 'Spread / Sobretaxa (%)'}
+                    </label>
+                    <div className="relative">
+                        <input 
+                        type="number" 
+                        step="0.01"
+                        className="w-full rounded-lg border-slate-300 border p-2 focus:ring-2 focus:ring-emerald-500 focus:outline-none pr-8"
+                        value={formData.annualRate}
+                        onChange={e => setFormData({...formData, annualRate: Number(e.target.value)})}
+                        placeholder={formData.indexName === 'Prefixado' ? "Ex: 12.0" : "Ex: 3.5"}
+                        />
+                        <span className="absolute right-3 top-2 text-slate-400 text-sm">%</span>
+                    </div>
+                </div>
+                
+                <div className="col-span-2 mt-2 bg-blue-50 p-3 rounded border border-blue-100 text-xs text-blue-800">
+                    <div className="flex justify-between items-center">
+                        <span className="font-semibold">Simulação de Taxa Efetiva:</span>
+                        <span className="font-bold text-sm">{totalEstimatedRate.toFixed(2)}% a.a.</span>
+                    </div>
+                    <div className="flex justify-between items-center mt-1 text-blue-600/80">
+                        <span>Capitalização para cálculos:</span>
+                        <span>Diária (Padrão Bancário)</span>
+                    </div>
                 </div>
             </div>
           </div>
@@ -386,6 +496,7 @@ const ContractModal = ({
           <div className="col-span-2">
             <label className="block text-sm font-medium text-slate-700 mb-1">Status</label>
             <select 
+              required
               className="w-full rounded-lg border-slate-300 border p-2 focus:ring-2 focus:ring-emerald-500 focus:outline-none"
               value={formData.status}
               onChange={e => setFormData({...formData, status: e.target.value as ContractStatus})}
@@ -408,12 +519,14 @@ const ContractModal = ({
   );
 };
 
-const PaymentModal = ({ isOpen, onClose, onConfirm, contract, isProcessing }: { 
+const PaymentModal = ({ isOpen, onClose, onConfirm, contract, isProcessing, initialAmount, interestMethod }: { 
     isOpen: boolean; 
     onClose: () => void; 
     onConfirm: (amount: number, date: string, notes: string) => void;
     contract: Contract | null;
     isProcessing: boolean;
+    initialAmount?: number;
+    interestMethod: InterestMethod;
 }) => {
     const [amount, setAmount] = useState('');
     const [date, setDate] = useState('');
@@ -421,15 +534,15 @@ const PaymentModal = ({ isOpen, onClose, onConfirm, contract, isProcessing }: {
     
     useEffect(() => {
         if (isOpen) {
-            setAmount('');
+            setAmount(initialAmount !== undefined ? initialAmount.toFixed(2) : '');
             setDate(new Date().toISOString().split('T')[0]); 
             setNotes('');
         }
-    }, [isOpen]);
+    }, [isOpen, initialAmount]);
     
     if (!isOpen || !contract) return null;
 
-    const { currentDebt } = calculateProjection(contract);
+    const { currentDebt } = calculateProjection(contract, interestMethod);
     const payValue = Number(amount);
     const remainingAfterPay = Math.max(0, currentDebt - payValue);
     
@@ -458,7 +571,7 @@ const PaymentModal = ({ isOpen, onClose, onConfirm, contract, isProcessing }: {
                         <p className="text-sm text-slate-500 mb-1">Contrato</p>
                         <p className="font-medium text-slate-800">{contract.bank} - {contract.contractNumber}</p>
                         <div className="mt-3 pt-3 border-t border-slate-200 flex justify-between items-center">
-                            <span className="text-sm text-slate-500">Saldo Devedor Atual:</span>
+                            <span className="text-sm text-slate-500">Saldo Devedor Atual ({interestMethod === 'compound' ? 'Composto' : 'Simples'}):</span>
                             <span className="font-bold text-red-600">{formatCurrency(currentDebt)}</span>
                         </div>
                     </div>
@@ -535,7 +648,7 @@ const PaymentModal = ({ isOpen, onClose, onConfirm, contract, isProcessing }: {
     );
 };
 
-const AIAdvisor = ({ contracts }: { contracts: Contract[] }) => {
+const AIAdvisor = ({ contracts, interestMethod }: { contracts: Contract[], interestMethod: InterestMethod }) => {
   const [analysis, setAnalysis] = useState<string>('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -552,7 +665,7 @@ const AIAdvisor = ({ contracts }: { contracts: Contract[] }) => {
     try {
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
       const dataSummary = contracts.map(c => {
-          const { currentDebt } = calculateProjection(c);
+          const { currentDebt } = calculateProjection(c, interestMethod);
           return {
             bank: c.bank,
             desc: c.description,
@@ -566,7 +679,7 @@ const AIAdvisor = ({ contracts }: { contracts: Contract[] }) => {
 
       const prompt = `
         Você é um consultor financeiro especializado em agronegócio para a Fazenda Bom Sossego.
-        Analise a seguinte lista de Cédulas Rurais e dívidas bancárias, considerando os valores projetados com juros compostos.
+        Analise a seguinte lista de Cédulas Rurais e dívidas bancárias, considerando os valores projetados utilizando o método de juros ${interestMethod === 'compound' ? 'Compostos' : 'Simples'}.
         
         Dados: ${JSON.stringify(dataSummary)}
 
@@ -649,11 +762,17 @@ const AIAdvisor = ({ contracts }: { contracts: Contract[] }) => {
 const App = () => {
   const [contracts, setContracts] = useState<Contract[]>([]);
   const [loadingData, setLoadingData] = useState(true);
+  const [importing, setImporting] = useState(false);
   
+  // Interest Calculation Method State
+  const [interestMethod, setInterestMethod] = useState<InterestMethod>('compound');
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
   const [filters, setFilters] = useState({
     search: '',
     bank: 'all',
     status: 'all',
+    operationType: 'all',
     dateStart: '',
     dateEnd: ''
   });
@@ -668,9 +787,10 @@ const App = () => {
   const [isPaymentModalOpen, setIsPaymentModalOpen] = useState(false);
   const [isProcessingPayment, setIsProcessingPayment] = useState(false);
   const [paymentContract, setPaymentContract] = useState<Contract | null>(null);
+  const [paymentInitialAmount, setPaymentInitialAmount] = useState<number | undefined>(undefined);
   
   // Notification State
-  const [notification, setNotification] = useState<{message: string, type: 'warning' | 'info' | 'error'} | null>(null);
+  const [notification, setNotification] = useState<{message: string, type: 'warning' | 'info' | 'error' | 'success'} | null>(null);
 
   // --- Fetch Data from Supabase ---
   const fetchContracts = async () => {
@@ -686,20 +806,18 @@ const App = () => {
           if (data) {
               // Mapeia snake_case do banco para camelCase da aplicação
               const formattedContracts: Contract[] = data.map((c: any) => {
-                  const payments = c.payments.map((p: any) => ({
+                  const payments = c.payments ? c.payments.map((p: any) => ({
                       id: p.id,
                       date: p.date,
                       amount: Number(p.amount),
                       notes: p.notes,
                       contract_id: p.contract_id
-                  }));
+                  })) : [];
 
                   // Calcula o total pago baseado na tabela de pagamentos
                   const totalPaid = payments.reduce((acc: number, p: Payment) => acc + p.amount, 0);
                   
-                  // Atualiza o status dinamicamente (opcional, mas bom para consistência)
-                  // Note: A lógica exata de 'paid' vs 'partial' pode depender da projeção, 
-                  // mas aqui usamos dados brutos. A projeção cuida da exibição final.
+                  // Atualiza o status dinamicamente
                   let derivedStatus = c.status;
                   if (c.status !== 'paid' && totalPaid > 0) derivedStatus = 'partial';
                   if (c.status === 'pending' && totalPaid > 0) derivedStatus = 'partial';
@@ -716,6 +834,7 @@ const App = () => {
                       payments: payments,
                       indexName: c.index_name,
                       annualRate: Number(c.annual_rate),
+                      capitalizationPeriod: c.capitalization_period || 'monthly',
                       status: derivedStatus as ContractStatus
                   };
               });
@@ -723,7 +842,7 @@ const App = () => {
           }
       } catch (err: any) {
           console.error("Error fetching data:", err);
-          setNotification({ message: 'Erro ao carregar dados do servidor.', type: 'error' });
+          setNotification({ message: `Erro ao carregar dados: ${err.message || 'Falha de conexão'}`, type: 'error' });
       } finally {
           setLoadingData(false);
       }
@@ -784,11 +903,20 @@ const App = () => {
               dateMatch = dateMatch && dueDate <= new Date(filters.dateEnd);
           }
           
-          return statusMatch && bankMatch && searchMatch && dateMatch;
+          // Operation Type Logic
+          const category = getOperationCategory(c.description);
+          const opTypeMatch = filters.operationType === 'all' || category === filters.operationType;
+          
+          return statusMatch && bankMatch && searchMatch && dateMatch && opTypeMatch;
       });
   }, [contracts, filters]);
 
   const uniqueBanks = useMemo(() => [...new Set(contracts.map(c => c.bank))], [contracts]);
+  
+  const uniqueOperationTypes = useMemo(() => {
+      const types = new Set(contracts.map(c => getOperationCategory(c.description)));
+      return Array.from(types).sort();
+  }, [contracts]);
 
   const metrics = useMemo(() => {
     const totalOriginalDebt = filteredContracts.reduce((acc, c) => acc + c.amount, 0);
@@ -798,7 +926,7 @@ const App = () => {
     let totalProjectedPending = 0;
     
     filteredContracts.forEach(c => {
-        const { currentDebt } = calculateProjection(c);
+        const { currentDebt } = calculateProjection(c, interestMethod);
         totalProjectedPending += currentDebt;
     });
     
@@ -810,14 +938,14 @@ const App = () => {
     const nextDue = pendingContracts.length > 0 ? pendingContracts[0] : null;
 
     return { totalOriginalDebt, totalPaid, totalProjectedPending, nextDue };
-  }, [filteredContracts]);
+  }, [filteredContracts, interestMethod]);
 
   // Chart Data Preparation
   const chartData = useMemo(() => {
     const months: Record<string, number> = {};
     filteredContracts.forEach(c => {
       if (c.status === 'paid') return;
-      const { currentDebt } = calculateProjection(c);
+      const { currentDebt } = calculateProjection(c, interestMethod);
       const date = new Date(c.dueDate);
       const key = `${date.getMonth() + 1}/${date.getFullYear()}`;
       months[key] = (months[key] || 0) + currentDebt;
@@ -833,7 +961,7 @@ const App = () => {
 
     const bankDist: Record<string, number> = {};
     filteredContracts.forEach(c => {
-      const { currentDebt } = calculateProjection(c);
+      const { currentDebt } = calculateProjection(c, interestMethod);
       if (currentDebt > 0) {
         bankDist[c.bank] = (bankDist[c.bank] || 0) + currentDebt;
       }
@@ -841,9 +969,147 @@ const App = () => {
     const pieData = Object.entries(bankDist).map(([name, value]) => ({ name, value }));
 
     return { projectionData, pieData };
-  }, [filteredContracts]);
+  }, [filteredContracts, interestMethod]);
 
   // --- Handlers (CRUD) ---
+
+  const handleDownloadTemplate = () => {
+    const headers = "Banco;Numero do Contrato;Descricao;Data Emissao;Data Vencimento;Valor Original;Taxa Anual;Indice;Status";
+    const example = "Banco do Brasil;123456;Custeio Soja;01/01/2023;01/01/2024;100000,00;12,5;Prefixado;Pendente";
+    const csvContent = "data:text/csv;charset=utf-8," + headers + "\n" + example;
+    const encodedUri = encodeURI(csvContent);
+    const link = document.createElement("a");
+    link.setAttribute("href", encodedUri);
+    link.setAttribute("download", "modelo_importacao_contratos.csv");
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    setImporting(true);
+    const reader = new FileReader();
+
+    reader.onload = async (e) => {
+        const text = e.target?.result as string;
+        if (!text) {
+             setImporting(false);
+             return;
+        }
+
+        const lines = text.split('\n');
+        let successCount = 0;
+        let errors = [];
+
+        // Ignora cabeçalho
+        const dataRows = lines.slice(1);
+
+        for (const row of dataRows) {
+            if (!row.trim()) continue;
+            
+            // Tenta detectar separador (; ou ,)
+            const separator = row.includes(';') ? ';' : ',';
+            const cols = row.split(separator).map(c => c.trim().replace(/"/g, ''));
+            
+            // Validação simples de colunas
+            if (cols.length < 5) continue; 
+
+            try {
+                // Parse Data (Assumindo formato CSV comum em PT-BR: DD/MM/YYYY e 1.000,00)
+                const bank = cols[0] || 'Desconhecido';
+                const contractNum = cols[1] || 'S/N';
+                const desc = cols[2] || 'Importado';
+                
+                // Parse Dates
+                let issueDate = '';
+                if (cols[3] && cols[3].includes('/')) {
+                   const [d, m, y] = cols[3].split('/');
+                   issueDate = `${y}-${m}-${d}`;
+                } else {
+                   issueDate = new Date().toISOString().split('T')[0];
+                }
+
+                let dueDate = '';
+                if (cols[4] && cols[4].includes('/')) {
+                   const [d, m, y] = cols[4].split('/');
+                   dueDate = `${y}-${m}-${d}`;
+                } else {
+                   dueDate = new Date().toISOString().split('T')[0];
+                }
+
+                // Parse Value (remove . e troca , por .)
+                const valStr = cols[5] ? cols[5].replace(/\./g, '').replace(',', '.') : '0';
+                const amount = parseFloat(valStr);
+                
+                // Parse Rate
+                const rateStr = cols[6] ? cols[6].replace(',', '.') : '0';
+                const annualRate = parseFloat(rateStr);
+
+                const indexName = cols[7] || 'Prefixado';
+                const statusStr = cols[8]?.toLowerCase() || 'pending';
+                let status = 'pending';
+                if (statusStr.includes('pago') || statusStr.includes('quitado')) status = 'paid';
+                else if (statusStr.includes('parcial')) status = 'partial';
+
+                // Insert Contract
+                const contractPayload = {
+                    bank: bank,
+                    contract_number: contractNum,
+                    description: desc,
+                    issue_date: issueDate,
+                    due_date: dueDate,
+                    amount: amount,
+                    index_name: indexName,
+                    annual_rate: annualRate,
+                    status: status
+                };
+
+                const { data: contractData, error: insertError } = await supabase
+                    .from('contracts')
+                    .insert([contractPayload])
+                    .select();
+
+                if (insertError) throw insertError;
+
+                 // Se status for PAGO, cria um pagamento dummy para zerar a conta
+                if (status === 'paid' && contractData && contractData[0]) {
+                     await supabase.from('payments').insert([{
+                        contract_id: contractData[0].id,
+                        amount: amount,
+                        date: dueDate,
+                        notes: 'Importado como QUITADO via planilha'
+                    }]);
+                }
+
+                successCount++;
+
+            } catch (err: any) {
+                console.error("Row import error:", row, err);
+                errors.push(`Linha ${row.substring(0, 15)}...: ${err.message}`);
+            }
+        }
+
+        if (successCount > 0) {
+            setNotification({ message: `${successCount} contratos importados com sucesso!`, type: 'success' });
+            await fetchContracts();
+        } else {
+            setNotification({ message: `Nenhum contrato importado. Verifique o formato do CSV.`, type: 'error' });
+        }
+        
+        setImporting(false);
+        if (fileInputRef.current) fileInputRef.current.value = ''; // Reset input
+    };
+
+    reader.onerror = () => {
+        setNotification({ message: 'Erro ao ler arquivo.', type: 'error' });
+        setImporting(false);
+    };
+
+    reader.readAsText(file);
+  };
 
   const handleSaveContract = async (contractData: Partial<Contract>) => {
     setIsSaving(true);
@@ -857,7 +1123,8 @@ const App = () => {
             amount: contractData.amount,
             index_name: contractData.indexName,
             annual_rate: contractData.annualRate,
-            status: contractData.status
+            status: contractData.status,
+            // capitalization_period removed to fix schema error
         };
 
         let error;
@@ -879,9 +1146,10 @@ const App = () => {
         await fetchContracts();
         setIsModalOpen(false);
         setEditingContract(null);
-    } catch (err) {
+        setNotification({ message: 'Contrato salvo com sucesso!', type: 'success' });
+    } catch (err: any) {
         console.error("Error saving contract", err);
-        setNotification({ message: 'Erro ao salvar contrato.', type: 'error' });
+        setNotification({ message: `Erro ao salvar contrato: ${err.message || 'Erro desconhecido'}`, type: 'error' });
     } finally {
         setIsSaving(false);
     }
@@ -893,9 +1161,10 @@ const App = () => {
             const { error } = await supabase.from('contracts').delete().eq('id', id);
             if (error) throw error;
             await fetchContracts();
-        } catch (err) {
+            setNotification({ message: 'Contrato excluído.', type: 'info' });
+        } catch (err: any) {
             console.error(err);
-            setNotification({ message: 'Erro ao excluir contrato.', type: 'error' });
+            setNotification({ message: `Erro ao excluir: ${err.message}`, type: 'error' });
         }
     }
   };
@@ -910,8 +1179,14 @@ const App = () => {
     else setExpandedRowId(id);
   };
 
-  const handleOpenPayment = (contract: Contract) => {
+  const handleOpenPayment = (contract: Contract, fullPayment: boolean = false) => {
     setPaymentContract(contract);
+    if (fullPayment) {
+        const { currentDebt } = calculateProjection(contract, interestMethod);
+        setPaymentInitialAmount(currentDebt);
+    } else {
+        setPaymentInitialAmount(undefined);
+    }
     setIsPaymentModalOpen(true);
   };
 
@@ -930,36 +1205,75 @@ const App = () => {
         
         if (error) throw error;
 
-        // Se o pagamento cobrir quase tudo, atualize o status do contrato para 'paid'
-        // Mas a função fetchContracts já recalcula.
-        // Opcional: Atualizar status do contrato no banco se for quitação total.
-        // Por simplificação, deixamos o status como está ou atualizamos no fetch.
-        
-        // Vamos forçar uma verificação rápida para atualizar o status para 'paid' se necessário no banco
-        // Para isso, precisamos saber o total pago. O ideal é deixar a lógica de negócio no backend ou 
-        // no fetchContracts. Aqui apenas inserimos o pagamento.
+        // Check for full payment to update status
+        const { currentDebt } = calculateProjection(paymentContract, interestMethod);
+        if (amount >= (currentDebt - 0.05)) { // 5 cents tolerance
+             const { error: statusError } = await supabase
+                .from('contracts')
+                .update({ status: 'paid' })
+                .eq('id', paymentContract.id);
+             if (statusError) console.error("Error updating status:", statusError);
+        }
         
         await fetchContracts();
         setIsPaymentModalOpen(false);
         setPaymentContract(null);
-    } catch (err) {
+        setPaymentInitialAmount(undefined);
+        setNotification({ message: 'Pagamento registrado com sucesso!', type: 'success' });
+    } catch (err: any) {
         console.error("Error adding payment", err);
-        setNotification({ message: 'Erro ao registrar pagamento.', type: 'error' });
+        setNotification({ message: `Erro ao registrar pagamento: ${err.message}`, type: 'error' });
     } finally {
         setIsProcessingPayment(false);
     }
   };
 
   const handleDeletePayment = async (contractId: string, paymentId: string) => {
-    if(!confirm("Tem certeza que deseja remover este pagamento?")) return;
+    if(!confirm("Tem certeza que deseja remover este pagamento? O saldo devedor e o status do contrato serão recalculados.")) return;
     
     try {
+        // 1. Remove o pagamento
         const { error } = await supabase.from('payments').delete().eq('id', paymentId);
         if (error) throw error;
+
+        // 2. Recalcula o total pago para verificar se o status deve mudar
+        const { data: currentPayments } = await supabase
+            .from('payments')
+            .select('amount')
+            .eq('contract_id', contractId);
+        
+        const newTotalPaid = currentPayments?.reduce((acc, curr) => acc + Number(curr.amount), 0) || 0;
+
+        // 3. Busca dados do contrato para comparar
+        const { data: contractData } = await supabase
+            .from('contracts')
+            .select('amount, status')
+            .eq('id', contractId)
+            .single();
+        
+        if (contractData) {
+            let newStatus = contractData.status;
+            
+            // Se o total pago for menor que o valor original (com margem de erro), não pode ser 'paid'
+            if (newTotalPaid < (contractData.amount - 0.05)) { 
+                if (newTotalPaid > 0) newStatus = 'partial';
+                else newStatus = 'pending';
+            }
+
+            // Atualiza no banco se o status mudou
+            if (newStatus !== contractData.status) {
+                    await supabase
+                    .from('contracts')
+                    .update({ status: newStatus })
+                    .eq('id', contractId);
+            }
+        }
+
         await fetchContracts();
-    } catch (err) {
+        setNotification({ message: 'Pagamento removido e contrato atualizado.', type: 'success' });
+    } catch (err: any) {
         console.error(err);
-        setNotification({ message: 'Erro ao excluir pagamento.', type: 'error' });
+        setNotification({ message: `Erro ao excluir pagamento: ${err.message}`, type: 'error' });
     }
   };
 
@@ -970,14 +1284,20 @@ const App = () => {
       {/* Toast Notification */}
       {notification && (
         <div className={`fixed top-6 right-6 border-l-4 shadow-xl rounded-lg p-4 max-w-sm animate-in slide-in-from-right z-50 flex gap-3 items-start ${
-            notification.type === 'error' ? 'bg-white border-red-500' : 'bg-white border-amber-500'
+            notification.type === 'error' ? 'bg-white border-red-500' : 
+            notification.type === 'success' ? 'bg-white border-green-500' : 'bg-white border-amber-500'
         }`}>
-            <div className={notification.type === 'error' ? 'text-red-500' : 'text-amber-500'}>
-                {notification.type === 'error' ? <AlertCircle size={20}/> : <Bell size={20} />}
+            <div className={
+                notification.type === 'error' ? 'text-red-500' : 
+                notification.type === 'success' ? 'text-green-500' : 'text-amber-500'
+            }>
+                {notification.type === 'error' ? <AlertCircle size={20}/> : 
+                 notification.type === 'success' ? <CheckCircle size={20} /> : <Bell size={20} />}
             </div>
             <div className="flex-1">
                 <h4 className="font-bold text-slate-800 text-sm">
-                    {notification.type === 'error' ? 'Erro' : 'Atenção Necessária'}
+                    {notification.type === 'error' ? 'Erro' : 
+                     notification.type === 'success' ? 'Sucesso' : 'Atenção Necessária'}
                 </h4>
                 <p className="text-slate-600 text-sm mt-1">{notification.message}</p>
             </div>
@@ -996,6 +1316,27 @@ const App = () => {
               <p className="text-emerald-200 text-sm mt-1">Gestão de Passivos e Cédulas Rurais</p>
             </div>
             <div className="flex gap-2">
+               <input 
+                  type="file" 
+                  ref={fileInputRef} 
+                  onChange={handleFileUpload} 
+                  accept=".csv" 
+                  className="hidden" 
+               />
+               <button 
+                 onClick={handleDownloadTemplate}
+                 className="bg-emerald-800 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg flex items-center gap-2 text-sm font-medium transition-colors border border-emerald-700"
+                 title="Baixar modelo de planilha CSV para preenchimento"
+               >
+                 <Download size={18} /> Modelo
+               </button>
+               <button 
+                 onClick={() => fileInputRef.current?.click()}
+                 disabled={importing}
+                 className="bg-emerald-800 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg flex items-center gap-2 text-sm font-medium transition-colors border border-emerald-700"
+               >
+                 {importing ? <Loader2 className="animate-spin" size={18} /> : <FileUp size={18} />} Importar Planilha
+               </button>
                <button 
                 onClick={() => { setEditingContract(null); setIsModalOpen(true); }}
                 className="bg-emerald-500 hover:bg-emerald-400 text-white px-4 py-2 rounded-lg flex items-center gap-2 font-medium transition-colors"
@@ -1048,7 +1389,7 @@ const App = () => {
                 value={formatCurrency(metrics.totalProjectedPending)} 
                 icon={TrendingUp} 
                 colorClass="bg-emerald-600"
-                subtext="Inclui projeção de juros (Cap. Mensal)"
+                subtext={`Juros ${interestMethod === 'compound' ? 'Compostos' : 'Simples'} (Conta Gráfica)`}
                 highlight={true}
                 />
                 <StatCard 
@@ -1076,17 +1417,29 @@ const App = () => {
 
             {/* Filters */}
             {activeTab === 'contracts' && (
-                <FilterBar filters={filters} setFilters={setFilters} banks={uniqueBanks} />
+                <FilterBar 
+                    filters={filters} 
+                    setFilters={setFilters} 
+                    banks={uniqueBanks} 
+                    operationTypes={uniqueOperationTypes} 
+                    interestMethod={interestMethod}
+                    setInterestMethod={setInterestMethod}
+                />
             )}
 
             {/* Dashboard Tab */}
             {activeTab === 'dashboard' && (
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
                 <div className="lg:col-span-2 bg-white p-6 rounded-xl shadow-sm border border-slate-200">
-                <h3 className="text-lg font-semibold text-slate-800 mb-6 flex items-center gap-2">
-                    <Calendar size={20} className="text-emerald-600"/>
-                    Fluxo de Pagamentos (Valores Corrigidos)
-                </h3>
+                <div className="flex justify-between items-center mb-6">
+                    <h3 className="text-lg font-semibold text-slate-800 flex items-center gap-2">
+                        <Calendar size={20} className="text-emerald-600"/>
+                        Fluxo de Pagamentos
+                    </h3>
+                    <span className="text-xs font-medium px-2 py-1 bg-slate-100 rounded text-slate-500 border border-slate-200">
+                        Regime: {interestMethod === 'compound' ? 'Juros Compostos' : 'Juros Simples'}
+                    </span>
+                </div>
                 <div className="h-80">
                     <ResponsiveContainer width="100%" height="100%">
                     <BarChart data={chartData.projectionData} margin={{ top: 20, right: 30, left: 20, bottom: 5 }}>
@@ -1153,14 +1506,14 @@ const App = () => {
                         <th className="p-4">Datas (Emissão / Venc.)</th>
                         <th className="p-4">Índice / Taxa</th>
                         <th className="p-4">Valor Original</th>
-                        <th className="p-4 bg-emerald-50 text-emerald-700">Valor Atualizado (Est.)</th>
+                        <th className="p-4 bg-emerald-50 text-emerald-700">Valor Atualizado ({interestMethod === 'compound' ? 'Comp.' : 'Simp.'})</th>
                         <th className="p-4">Status</th>
                         <th className="p-4 text-right">Ações</th>
                     </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
                     {filteredContracts.map(contract => {
-                        const { currentDebt, projectedTotal, interestAccrued, daysElapsed, monthlyRate, monthsElapsed } = calculateProjection(contract);
+                        const { currentDebt, projectedTotal, interestAccrued, daysElapsed, totalAnnualRatePercent, dailyRateUsed } = calculateProjection(contract, interestMethod);
                         
                         const today = new Date();
                         const dDate = new Date(contract.dueDate);
@@ -1179,10 +1532,6 @@ const App = () => {
                         const totalDuration = Math.max(1, dueTime - issueTime);
                         const elapsedDuration = Math.max(0, new Date().getTime() - issueTime);
                         const progressPercent = Math.min(100, Math.max(0, (elapsedDuration / totalDuration) * 100));
-
-                        // Paid Amount is now tracked via Payment table sum
-                        // But let's check for visual consistency
-                        const untracked = 0; // We assume all data is now consistent via DB
 
                         return (
                         <React.Fragment key={contract.id}>
@@ -1205,20 +1554,22 @@ const App = () => {
                                         </div>
                                         <div className={`text-sm ${
                                             isOverdue ? 'text-red-600 font-medium' : 
-                                            isUrgent ? 'text-amber-600 font-medium' : 
+                                            isUrgent ? 'text-orange-600 font-medium' : 
                                             'text-slate-600'
                                         }`}>
                                             {formatDate(contract.dueDate)}
                                             {isOverdue && <span className="block text-xs font-bold uppercase mt-1 flex items-center gap-1"><AlertCircle size={10}/> Vencido</span>}
-                                            {isUrgent && <span className="block text-xs font-bold uppercase mt-1 flex items-center gap-1"><AlertCircle size={10}/> Vence em {daysToDue} dias</span>}
+                                            {isUrgent && <span className="block text-xs font-bold uppercase mt-1 flex items-center gap-1 text-orange-600"><AlertTriangle size={10} className="animate-pulse"/> {daysToDue} dias</span>}
                                         </div>
                                     </div>
                                 </td>
                                 <td className="p-4 text-sm text-slate-600">
                                     <div className="flex items-center gap-1">
-                                        <span className="font-medium text-slate-800">{contract.annualRate}%</span> a.a.
+                                        <span className="font-medium text-slate-800">{totalAnnualRatePercent.toFixed(2)}%</span> a.a.
                                     </div>
-                                    <div className="text-xs text-slate-500">{contract.indexName}</div>
+                                    <div className="text-xs text-slate-500">
+                                        {contract.indexName === 'Prefixado' ? 'Taxa Fixa' : `${contract.indexName} ${contract.annualRate}%`}
+                                    </div>
                                 </td>
                                 <td className="p-4 text-sm text-slate-600">
                                     <div>{formatCurrency(contract.amount)}</div>
@@ -1226,40 +1577,61 @@ const App = () => {
                                 </td>
                                 <td className="p-4 text-sm font-bold text-emerald-800 bg-emerald-50/50">
                                     {formatCurrency(currentDebt)}
-                                    {currentDebt > (contract.amount - contract.paidAmount) && (
-                                        <div className="text-xs font-normal text-emerald-600 flex items-center gap-1 mt-1">
+                                    {currentDebt > 0 && (
+                                        <div className="text-xs font-normal text-emerald-600 flex items-center gap-1 mt-1" title="Juros acumulados sobre o saldo devedor">
                                             <ArrowUpRight size={12} />
-                                            +{formatCurrency(currentDebt - (contract.amount - contract.paidAmount))} juros
+                                            {formatCurrency(interestAccrued)} juros
                                         </div>
                                     )}
                                 </td>
                                 <td className="p-4">
-                                    <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-semibold rounded-full border 
-                                    ${contract.status === 'paid' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 
-                                        isOverdue ? 'bg-red-50 text-red-700 border-red-200' :
-                                        contract.status === 'partial' ? 'bg-amber-50 text-amber-700 border-amber-200' : 
-                                        'bg-blue-50 text-blue-700 border-blue-200'}`}>
-                                        
-                                        {contract.status === 'paid' && <CheckCircle size={12} strokeWidth={2.5} />}
-                                        {isOverdue && contract.status !== 'paid' && <AlertCircle size={12} strokeWidth={2.5} />}
-                                        {!isOverdue && contract.status === 'partial' && <Info size={12} strokeWidth={2.5} />}
-                                        {!isOverdue && contract.status === 'pending' && <Clock size={12} strokeWidth={2.5} />}
-                                        
-                                        {contract.status === 'paid' ? 'Pago' : 
-                                        isOverdue ? 'Vencido' : 
-                                        contract.status === 'partial' ? 'Parcial' : 'Pendente'}
-                                    </span>
+                                    <div className="flex items-center gap-2">
+                                        <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-semibold rounded-full border 
+                                        ${contract.status === 'paid' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 
+                                            isOverdue ? 'bg-red-50 text-red-700 border-red-200' :
+                                            isUrgent ? 'bg-orange-100 text-orange-800 border-orange-300 shadow-sm ring-1 ring-orange-200' :
+                                            contract.status === 'partial' ? 'bg-blue-50 text-blue-700 border-blue-200' : 
+                                            'bg-slate-100 text-slate-600 border-slate-200'}`}>
+                                            
+                                            {contract.status === 'paid' && <CheckCircle size={12} strokeWidth={2.5} />}
+                                            {isOverdue && contract.status !== 'paid' && <AlertCircle size={12} strokeWidth={2.5} />}
+                                            {isUrgent && !isOverdue && contract.status !== 'paid' && <AlertTriangle size={12} strokeWidth={2.5} className="text-orange-600" />}
+                                            {!isUrgent && !isOverdue && contract.status === 'partial' && <Info size={12} strokeWidth={2.5} />}
+                                            {!isUrgent && !isOverdue && contract.status === 'pending' && <Clock size={12} strokeWidth={2.5} />}
+                                            
+                                            {contract.status === 'paid' ? 'Pago' : 
+                                            isOverdue ? 'Vencido' : 
+                                            isUrgent ? `Vence em ${daysToDue} dias` :
+                                            contract.status === 'partial' ? 'Parcial' : 'Pendente'}
+                                        </span>
+
+                                        {/* Alerta Visual Reforçado */}
+                                        {isUrgent && !isOverdue && contract.status !== 'paid' && (
+                                            <div title="Atenção: Vencimento Próximo" className="bg-orange-100 text-orange-600 p-1.5 rounded-full animate-pulse border border-orange-200 shadow-sm">
+                                                <AlertTriangle size={16} strokeWidth={2.5} />
+                                            </div>
+                                        )}
+                                    </div>
                                 </td>
                                 <td className="p-4 text-right space-x-2">
                                     <div className="flex justify-end gap-2" onClick={(e) => e.stopPropagation()}>
                                         {contract.status !== 'paid' && (
+                                            <>
                                             <button 
-                                                onClick={() => handleOpenPayment(contract)}
+                                                onClick={() => handleOpenPayment(contract, false)}
                                                 className="p-2 text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-full transition-colors"
                                                 title="Pagar Parcial"
                                             >
                                                 <Wallet size={16} />
                                             </button>
+                                            <button 
+                                                onClick={() => handleOpenPayment(contract, true)}
+                                                className="p-2 text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-full transition-colors"
+                                                title="Quitar Contrato (Total)"
+                                            >
+                                                <CheckCheck size={16} />
+                                            </button>
+                                            </>
                                         )}
                                         <button 
                                             onClick={() => handleEdit(contract)}
@@ -1334,20 +1706,19 @@ const App = () => {
                                                     </div>
                                                     <div className="mt-2 text-xs font-medium text-slate-600 text-center flex justify-center gap-2">
                                                         <span className="bg-slate-50 px-2 py-0.5 rounded border border-slate-100">{daysElapsed.toFixed(0)} dias decorridos</span>
-                                                        <span className="bg-slate-50 px-2 py-0.5 rounded border border-slate-100">{monthsElapsed.toFixed(1)} meses capitalizados</span>
                                                     </div>
                                                     </div>
 
                                                     {/* Rate Info */}
                                                     <div className="bg-blue-50 p-3 rounded-lg border border-blue-100">
                                                         <div className="flex justify-between items-center mb-1 pb-1 border-b border-blue-200/50">
-                                                            <span className="text-xs text-blue-700 font-medium">Taxa Anual</span>
-                                                            <span className="text-sm font-bold text-blue-800">{contract.annualRate}%</span>
+                                                            <span className="text-xs text-blue-700 font-medium">Taxa Efetiva Anual (Est.)</span>
+                                                            <span className="text-sm font-bold text-blue-800">{totalAnnualRatePercent.toFixed(2)}%</span>
                                                         </div>
                                                         <div className="flex justify-between items-center pt-1">
-                                                            <span className="text-xs text-blue-600">Taxa Mensal Efetiva</span>
+                                                            <span className="text-xs text-blue-600">Taxa Diária Aplicada</span>
                                                             <span className="text-xs font-mono bg-white px-2 py-0.5 rounded text-blue-700 border border-blue-200 shadow-sm font-medium">
-                                                                {monthlyRate.toFixed(4)}%
+                                                                {(dailyRateUsed * 100).toFixed(6)}%
                                                             </span>
                                                         </div>
                                                     </div>
@@ -1357,68 +1728,117 @@ const App = () => {
                                             {/* Column 3: Financial Calculation */}
                                             <div className="space-y-4">
                                                 <h4 className="flex items-center gap-2 text-sm font-bold text-slate-800 uppercase tracking-wider">
-                                                <Calculator size={16} className="text-emerald-600"/> Memória de Cálculo
+                                                <Calculator size={16} className="text-emerald-600"/> Memória de Cálculo (Conta Gráfica)
                                                 </h4>
                                                 <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden h-full flex flex-col">
                                                     <div className="p-5 space-y-3 bg-slate-50/50 flex-1">
                                                         <div className="flex justify-between text-sm items-center">
-                                                            <span className="text-slate-500">Valor Principal</span>
+                                                            <span className="text-slate-500">Valor Principal Original</span>
                                                             <span className="font-medium text-slate-700">{formatCurrency(contract.amount)}</span>
                                                         </div>
                                                         <div className="flex justify-between text-sm items-start">
                                                             <div className="flex flex-col">
                                                                 <span className="text-emerald-600 font-medium flex items-center gap-1">
-                                                                    (+) Juros Compostos
+                                                                    (+) Juros Acumulados
                                                                 </span>
                                                                 <span className="text-[10px] text-slate-400 mt-0.5">
-                                                                    Fator: (1 + {monthlyRate.toFixed(2)}%) ^ {monthsElapsed.toFixed(1)}
+                                                                    Calculado sobre saldo diário
                                                                 </span>
                                                             </div>
                                                             <span className="font-medium text-emerald-600">+{formatCurrency(interestAccrued)}</span>
                                                         </div>
                                                         {contract.paidAmount > 0 && (
                                                             <div className="flex justify-between text-sm items-center pt-2 border-t border-slate-100 border-dashed">
-                                                                <span className="text-slate-500">(-) Total Pago</span>
+                                                                <span className="text-slate-500">(-) Amortizações Totais</span>
                                                                 <span className="font-medium text-slate-600">-{formatCurrency(contract.paidAmount)}</span>
                                                             </div>
                                                         )}
-                                                        
-                                                        {/* Payment History Section */}
-                                                        <div className="mt-4 border-t border-slate-100 pt-3">
-                                                            <p className="text-xs font-semibold text-slate-500 uppercase mb-2">Histórico de Pagamentos</p>
-                                                            <div className="space-y-2 max-h-32 overflow-y-auto pr-1">
-                                                            {(contract.payments || []).map(p => (
-                                                                <div key={p.id} className="flex justify-between items-center text-xs text-slate-600 py-1 border-b border-slate-50 last:border-0 group">
-                                                                    <div className="flex flex-col">
-                                                                        <span className="text-slate-500">{formatDate(p.date)}</span>
-                                                                        {p.notes && <span className="text-[10px] text-slate-400 italic">{p.notes}</span>}
-                                                                    </div>
-                                                                    <div className="flex items-center gap-3">
-                                                                        <span className="font-medium text-emerald-600">{formatCurrency(p.amount)}</span>
-                                                                        <button 
-                                                                            onClick={(e) => { e.stopPropagation(); handleDeletePayment(contract.id, p.id); }}
-                                                                            className="text-slate-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"
-                                                                            title="Excluir pagamento"
-                                                                        >
-                                                                            <Trash2 size={14} />
-                                                                        </button>
-                                                                    </div>
-                                                                </div>
-                                                            ))}
-                                                            {contract.paidAmount === 0 && (
-                                                                <p className="text-xs text-slate-400 italic">Nenhum pagamento registrado.</p>
-                                                            )}
-                                                            </div>
-                                                        </div>
-
                                                     </div>
                                                     <div className="p-4 bg-emerald-50 border-t border-emerald-100 flex justify-between items-center">
-                                                        <span className="text-sm font-bold text-emerald-900 uppercase tracking-wide">Saldo Atualizado</span>
+                                                        <span className="text-sm font-bold text-emerald-900 uppercase tracking-wide">Saldo Devedor Hoje</span>
                                                         <span className="text-xl font-bold text-emerald-700">{formatCurrency(currentDebt)}</span>
                                                     </div>
                                                 </div>
                                             </div>
 
+                                            </div>
+
+                                            {/* Payment History Dedicated Section */}
+                                            <div className="mt-8 pt-6 border-t border-slate-200">
+                                                <div className="flex justify-between items-center mb-4">
+                                                    <h4 className="flex items-center gap-2 text-sm font-bold text-slate-800 uppercase tracking-wider">
+                                                        <Wallet size={16} className="text-emerald-600"/> 
+                                                        Histórico de Pagamentos
+                                                        <span className="ml-2 bg-slate-100 text-slate-600 py-0.5 px-2 rounded-full text-xs font-normal normal-case">
+                                                            {contract.payments?.length || 0} lançamentos
+                                                        </span>
+                                                    </h4>
+                                                </div>
+                                                
+                                                {(contract.payments && contract.payments.length > 0) ? (
+                                                    <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden ring-1 ring-slate-100">
+                                                        <table className="w-full text-left text-sm">
+                                                            <thead className="bg-slate-50 border-b border-slate-100 text-xs uppercase text-slate-500 font-semibold">
+                                                                <tr>
+                                                                    <th className="px-4 py-3 w-32">Data</th>
+                                                                    <th className="px-4 py-3">Observação / Referência</th>
+                                                                    <th className="px-4 py-3 text-right">Valor Pago</th>
+                                                                    <th className="px-4 py-3 w-16 text-center">Ações</th>
+                                                                </tr>
+                                                            </thead>
+                                                            <tbody className="divide-y divide-slate-100">
+                                                                {[...contract.payments]
+                                                                    .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()) // Sort by date descending
+                                                                    .map(p => (
+                                                                    <tr key={p.id} className="hover:bg-slate-50 transition-colors group">
+                                                                        <td className="px-4 py-3 text-slate-600 font-medium whitespace-nowrap">
+                                                                            <div className="flex items-center gap-2">
+                                                                                <CalendarDays size={14} className="text-slate-400"/>
+                                                                                {formatDate(p.date)}
+                                                                            </div>
+                                                                        </td>
+                                                                        <td className="px-4 py-3 text-slate-600">
+                                                                            {p.notes ? (
+                                                                                <span className="text-slate-700">{p.notes}</span>
+                                                                            ) : (
+                                                                                <span className="text-slate-300 italic flex items-center gap-1">
+                                                                                    <FilePenLine size={12}/> Sem observações
+                                                                                </span>
+                                                                            )}
+                                                                        </td>
+                                                                        <td className="px-4 py-3 text-right font-bold text-emerald-700 font-mono">
+                                                                            {formatCurrency(p.amount)}
+                                                                        </td>
+                                                                        <td className="px-4 py-3 text-center">
+                                                                             <button 
+                                                                                onClick={(e) => { e.stopPropagation(); handleDeletePayment(contract.id, p.id); }}
+                                                                                className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors opacity-0 group-hover:opacity-100 focus:opacity-100"
+                                                                                title="Excluir pagamento"
+                                                                            >
+                                                                                <Trash2 size={16} />
+                                                                            </button>
+                                                                        </td>
+                                                                    </tr>
+                                                                ))}
+                                                            </tbody>
+                                                            <tfoot className="bg-slate-50/50 border-t border-slate-200">
+                                                                <tr>
+                                                                    <td colSpan={2} className="px-4 py-3 text-right text-xs font-bold text-slate-500 uppercase tracking-wide">Total Amortizado:</td>
+                                                                    <td className="px-4 py-3 text-right font-bold text-emerald-700 text-base">{formatCurrency(contract.paidAmount)}</td>
+                                                                    <td></td>
+                                                                </tr>
+                                                            </tfoot>
+                                                        </table>
+                                                    </div>
+                                                ) : (
+                                                    <div className="bg-slate-50 rounded-xl border border-slate-200 border-dashed p-8 text-center text-slate-400">
+                                                        <div className="bg-slate-100 w-12 h-12 rounded-full flex items-center justify-center mx-auto mb-3">
+                                                            <Wallet size={24} className="text-slate-300" />
+                                                        </div>
+                                                        <p className="text-sm font-medium text-slate-600">Nenhum pagamento registrado</p>
+                                                        <p className="text-xs text-slate-400 mt-1">Utilize o botão de "Lançar Pagamento" acima para registrar baixas.</p>
+                                                    </div>
+                                                )}
                                             </div>
                                         </div>
                                     </td>
@@ -1433,7 +1853,7 @@ const App = () => {
                             <div className="flex flex-col items-center gap-3">
                                 <FileText size={48} className="text-slate-200" />
                                 <p>Nenhum contrato encontrado com os filtros atuais.</p>
-                                <button onClick={() => setFilters({search: '', bank: 'all', status: 'all', dateStart: '', dateEnd: '' })} className="text-emerald-600 text-sm hover:underline">Limpar filtros</button>
+                                <button onClick={() => setFilters({search: '', bank: 'all', status: 'all', operationType: 'all', dateStart: '', dateEnd: '' })} className="text-emerald-600 text-sm hover:underline">Limpar filtros</button>
                             </div>
                         </td>
                         </tr>
@@ -1446,7 +1866,7 @@ const App = () => {
 
             {/* AI Tab */}
             {activeTab === 'ai' && (
-            <AIAdvisor contracts={contracts} />
+            <AIAdvisor contracts={contracts} interestMethod={interestMethod} />
             )}
         </>
         )}
@@ -1468,6 +1888,8 @@ const App = () => {
         onConfirm={handleConfirmPayment}
         contract={paymentContract}
         isProcessing={isProcessingPayment}
+        initialAmount={paymentInitialAmount}
+        interestMethod={interestMethod}
       />
     </div>
   );
