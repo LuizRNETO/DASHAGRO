@@ -184,7 +184,26 @@ const INITIAL_CONTRACTS: Contract[] = [
 // --- Components ---
 
 export default function Dashboard() {
-  const [contracts, setContracts] = useState<Contract[]>(INITIAL_CONTRACTS);
+  // Initialize contracts from localStorage or fall back to mock data
+  const [contracts, setContracts] = useState<Contract[]>(() => {
+    try {
+        const saved = localStorage.getItem('agrofinance_contracts');
+        return saved ? JSON.parse(saved) : INITIAL_CONTRACTS;
+    } catch (e) {
+        console.error("Erro ao carregar dados:", e);
+        return INITIAL_CONTRACTS;
+    }
+  });
+
+  // Persist contracts changes to localStorage
+  useEffect(() => {
+    try {
+        localStorage.setItem('agrofinance_contracts', JSON.stringify(contracts));
+    } catch (e) {
+        console.error("Erro ao salvar dados:", e);
+    }
+  }, [contracts]);
+
   const [showForm, setShowForm] = useState(false);
   const [selectedContract, setSelectedContract] = useState<Contract | null>(null);
   const [activeTab, setActiveTab] = useState<'dashboard' | 'contracts' | 'projection'>('dashboard');
