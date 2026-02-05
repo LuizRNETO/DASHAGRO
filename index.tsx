@@ -1,11 +1,12 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
 import { 
   Plus, Trash2, DollarSign, TrendingUp, Calendar, 
   PieChart as PieChartIcon, Landmark, ArrowUpRight, 
   Search, X, Save, AlertCircle, FileText, CreditCard,
   ChevronRight, MoreVertical, LayoutGrid, List, Eye, Clock, Percent,
-  History, Pencil, CalendarRange, CheckCircle2, ArrowRight, AlertTriangle, Filter
+  History, Pencil, CalendarRange, CheckCircle2, ArrowRight, AlertTriangle, Filter,
+  Calculator, RotateCcw, CalendarDays, Layers
 } from 'lucide-react';
 import { 
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, 
@@ -22,15 +23,23 @@ interface Payment {
   note?: string;
 }
 
+interface Installment {
+    id: string;
+    number: number;
+    dueDate: string;
+    originalAmount: number;
+}
+
 interface Contract {
   id: string;
   bank: string;
   contractNumber: string;
-  indexName: 'CDI' | 'Prefixado' | 'IPCA' | 'Selic';
+  indexName: 'CDI' | 'Prefixado' | 'IPCA' | 'Selic' | 'Sem Indexador';
   annualRate: number; // e.g., 110 (% of CDI) or 12 (Fixed %)
   amount: number;
   paidAmount: number;
   payments: Payment[];
+  installments: Installment[];
   startDate: string;
   dueDate: string;
   status: 'paid' | 'active' | 'pending';
@@ -52,6 +61,40 @@ const getMonthName = (date: Date) => {
   return str.charAt(0).toUpperCase() + str.slice(1);
 };
 
+const getMonthOptions = () => {
+    const months = [];
+    for(let i=0; i<12; i++) {
+        const date = new Date(2000, i, 1);
+        const name = new Intl.DateTimeFormat('pt-BR', { month: 'long' }).format(date);
+        months.push({ value: i, label: name.charAt(0).toUpperCase() + name.slice(1) });
+    }
+    return months;
+};
+
+const addMonths = (dateStr: string, months: number) => {
+    const date = new Date(dateStr);
+    date.setMonth(date.getMonth() + months);
+    return date.toISOString().split('T')[0];
+};
+
+const getContractDisplayStatus = (contract: Contract) => {
+    // Floating point tolerance
+    if (contract.paidAmount >= contract.amount - 0.01) {
+        return 'liquidado';
+    }
+    
+    const today = new Date();
+    today.setHours(0,0,0,0);
+    const dueDate = new Date(contract.dueDate);
+    dueDate.setHours(0,0,0,0); // Normalize time
+    
+    if (dueDate < today) {
+        return 'vencido';
+    }
+    
+    return 'ativo';
+};
+
 const COLORS = ['#10B981', '#3B82F6', '#F59E0B', '#EF4444', '#8B5CF6'];
 
 // --- Mock Data ---
@@ -68,6 +111,12 @@ const INITIAL_CONTRACTS: Contract[] = [
       payments: [
         { id: 'p1', date: '2023-07-15', amount: 50000, note: 'Amortização Parcial' },
         { id: 'p2', date: '2024-01-15', amount: 100000, note: 'Pagamento Juros + Principal' }
+      ],
+      installments: [
+          { id: 'i1', number: 1, dueDate: '2023-07-15', originalAmount: 50000 },
+          { id: 'i2', number: 2, dueDate: '2024-01-15', originalAmount: 150000 },
+          { id: 'i3', number: 3, dueDate: '2024-07-15', originalAmount: 150000 },
+          { id: 'i4', number: 4, dueDate: '2025-01-15', originalAmount: 150000 },
       ],
       startDate: '2023-01-15',
       dueDate: '2025-01-15',
@@ -86,6 +135,10 @@ const INITIAL_CONTRACTS: Contract[] = [
         { id: 'p3', date: '2022-12-01', amount: 60000, note: 'Parcela 1/2' },
         { id: 'p4', date: '2023-06-01', amount: 60000, note: 'Parcela 2/2 - Quitação' }
       ],
+      installments: [
+          { id: 'i5', number: 1, dueDate: '2022-12-01', originalAmount: 60000 },
+          { id: 'i6', number: 2, dueDate: '2023-06-01', originalAmount: 60000 },
+      ],
       startDate: '2022-06-01',
       dueDate: '2023-06-01',
       status: 'paid',
@@ -100,6 +153,10 @@ const INITIAL_CONTRACTS: Contract[] = [
         amount: 750000,
         paidAmount: 0,
         payments: [],
+        installments: [
+            { id: 'i7', number: 1, dueDate: '2025-02-10', originalAmount: 375000 },
+            { id: 'i8', number: 2, dueDate: '2026-02-10', originalAmount: 375000 },
+        ],
         startDate: '2024-02-10',
         dueDate: '2026-02-10',
         status: 'active',
@@ -114,6 +171,9 @@ const INITIAL_CONTRACTS: Contract[] = [
         amount: 250000,
         paidAmount: 250000,
         payments: [{ id: 'p5', date: '2023-11-20', amount: 250000, note: 'Liquidação Total' }],
+        installments: [
+             { id: 'i9', number: 1, dueDate: '2023-11-20', originalAmount: 250000 },
+        ],
         startDate: '2022-11-20',
         dueDate: '2023-11-20',
         status: 'paid',
@@ -131,6 +191,11 @@ export default function Dashboard() {
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
   const [editingId, setEditingId] = useState<string | null>(null);
 
+  // Projection View State
+  const [projectionYear, setProjectionYear] = useState(new Date().getFullYear());
+  const [projectionMonth, setProjectionMonth] = useState(new Date().getMonth());
+  const [projectionViewType, setProjectionViewType] = useState<'active' | 'all'>('active');
+
   // Filters State
   const [searchTerm, setSearchTerm] = useState('');
   const [filterStartDate, setFilterStartDate] = useState('');
@@ -139,7 +204,7 @@ export default function Dashboard() {
   // Confirmation Modal State
   const [confirmation, setConfirmation] = useState<{
     isOpen: boolean;
-    type: 'contract' | 'payment' | null;
+    type: 'contract' | 'payment' | 'revert_payment' | null;
     id: string | null;
     title: string;
     message: string;
@@ -156,6 +221,7 @@ export default function Dashboard() {
   const [paymentForm, setPaymentForm] = useState({ date: '', amount: '', note: '' });
   
   // Form State
+  const [numInstallments, setNumInstallments] = useState<number>(1);
   const [formData, setFormData] = useState<Partial<Contract>>({
       bank: '',
       contractNumber: '',
@@ -166,7 +232,8 @@ export default function Dashboard() {
       startDate: '',
       dueDate: '',
       status: 'active',
-      notes: ''
+      notes: '',
+      installments: []
   });
 
   // Derived State (KPIs)
@@ -182,7 +249,11 @@ export default function Dashboard() {
     let activePrincipalSum = 0;
 
     contracts.filter(c => c.status === 'active').forEach(c => {
-        const rate = c.indexName === 'Prefixado' ? c.annualRate : (c.annualRate / 100) * currentCDI;
+        let rate = 0;
+        if (c.indexName === 'Prefixado') rate = c.annualRate;
+        else if (c.indexName === 'Sem Indexador') rate = 0;
+        else rate = (c.annualRate / 100) * currentCDI;
+
         const principal = c.amount - c.paidAmount;
         weightedRateSum += rate * principal;
         activePrincipalSum += principal;
@@ -225,29 +296,175 @@ export default function Dashboard() {
     })).sort((a, b) => b.rate - a.rate);
   }, [contracts]);
 
+  // Logic to calculate remaining balance of a specific installment
+  const getInstallmentBalance = (contract: Contract, installment: Installment) => {
+      const prevInstallments = (contract.installments || [])
+        .filter(i => i.number < installment.number)
+        .reduce((sum, i) => sum + i.originalAmount, 0);
+      
+      const totalPaid = contract.paidAmount;
+      const amountCoveredPreviously = Math.min(totalPaid, prevInstallments);
+      const remainingPaidForThis = Math.max(0, totalPaid - amountCoveredPreviously);
+      
+      const balance = Math.max(0, installment.originalAmount - remainingPaidForThis);
+      return balance;
+  };
+
+  const detailedMonthlyData = useMemo(() => {
+      const items: Array<{
+          id: string;
+          day: number;
+          date: Date;
+          bank: string;
+          contractNumber: string;
+          description: string;
+          totalAmount: number;
+          remainingAmount: number;
+          status: 'paid' | 'partial' | 'pending';
+          contract: Contract;
+      }> = [];
+
+      contracts.forEach(c => {
+          // If view is active only, skip paid contracts
+          if (projectionViewType === 'active' && c.status === 'paid') return;
+
+          if (c.installments && c.installments.length > 0) {
+              c.installments.forEach(inst => {
+                  const d = new Date(inst.dueDate);
+                  const [y, m, day] = inst.dueDate.split('-').map(Number);
+                  
+                  if (y === projectionYear && (m - 1) === projectionMonth) {
+                      const balance = getInstallmentBalance(c, inst);
+                      
+                      let status: 'paid' | 'partial' | 'pending' = 'pending';
+                      if (balance <= 0.01) status = 'paid';
+                      else if (balance < inst.originalAmount) status = 'partial';
+
+                      // If view is 'active', skip if fully paid. 
+                      // If view is 'all', show everything (even if paid).
+                      if (projectionViewType === 'active' && balance <= 0.01) return;
+
+                      items.push({
+                          id: `${c.id}-${inst.id}`,
+                          day: day,
+                          date: new Date(y, m-1, day),
+                          bank: c.bank,
+                          contractNumber: c.contractNumber,
+                          description: `Parcela ${inst.number}/${c.installments.length}`,
+                          totalAmount: inst.originalAmount,
+                          remainingAmount: balance,
+                          status,
+                          contract: c
+                      });
+                  }
+              });
+          } else {
+               // Fallback for no installments
+               const [y, m, day] = c.dueDate.split('-').map(Number);
+               if (y === projectionYear && (m - 1) === projectionMonth) {
+                   const balance = c.amount - c.paidAmount;
+                   // If view is 'active', skip if paid.
+                   if (projectionViewType === 'active' && balance <= 0.01) return;
+
+                   let status: 'paid' | 'partial' | 'pending' = 'pending';
+                   if (balance <= 0.01) status = 'paid';
+                   else if (c.paidAmount > 0) status = 'partial';
+
+                   items.push({
+                       id: c.id,
+                       day: day,
+                       date: new Date(y, m-1, day),
+                       bank: c.bank,
+                       contractNumber: c.contractNumber,
+                       description: 'Pagamento Único / Restante',
+                       totalAmount: c.amount,
+                       remainingAmount: balance,
+                       status,
+                       contract: c
+                   });
+               }
+          }
+      });
+
+      return items.sort((a, b) => a.day - b.day);
+  }, [contracts, projectionYear, projectionMonth, projectionViewType]);
+
   const projectionData = useMemo(() => {
     const groups: Record<string, { date: Date, total: number, items: Contract[] }> = {};
+    const isAllView = projectionViewType === 'all';
     
-    contracts.filter(c => c.status !== 'paid').forEach(c => {
-        // Parse the ISO date string (YYYY-MM-DD) to ensure correct local grouping
-        const [year, month] = c.dueDate.split('-').map(Number);
-        const dateKey = `${year}-${month}`;
-        
-        if (!groups[dateKey]) {
-            groups[dateKey] = {
-                date: new Date(year, month - 1, 1),
-                total: 0,
-                items: []
-            };
+    contracts.filter(c => {
+        // If Active view: filter out paid contracts
+        if (!isAllView) return c.status !== 'paid';
+        return true;
+    }).forEach(c => {
+        if (c.installments && c.installments.length > 0) {
+            // Logic: Determine which installments are unpaid (Active view) or All installments (All view)
+            
+            // If All view, we act as if nothing is paid for the purpose of showing the schedule
+            let remainingPaid = isAllView ? 0 : c.paidAmount;
+            
+            c.installments.forEach(inst => {
+                const instAmount = inst.originalAmount;
+                if (remainingPaid >= instAmount) {
+                    remainingPaid -= instAmount;
+                    // Fully paid.
+                    // If Active view: Don't add to projection.
+                    // If All view: Add to projection (it's part of the schedule).
+                    if (isAllView) {
+                         const [year, month] = inst.dueDate.split('-').map(Number);
+                        const dateKey = `${year}-${month}`;
+                        if (!groups[dateKey]) {
+                            groups[dateKey] = { date: new Date(year, month - 1, 1), total: 0, items: [] };
+                        }
+                        groups[dateKey].total += instAmount;
+                        if (!groups[dateKey].items.find(item => item.id === c.id)) groups[dateKey].items.push(c);
+                    }
+
+                } else {
+                    // Partially paid or unpaid
+                    // If Active view: Add remaining balance.
+                    // If All view: Add full installment amount.
+                    const amountDue = isAllView ? instAmount : (instAmount - remainingPaid);
+                    remainingPaid = 0; 
+                    
+                    const [year, month] = inst.dueDate.split('-').map(Number);
+                    const dateKey = `${year}-${month}`;
+                    
+                    if (!groups[dateKey]) {
+                        groups[dateKey] = {
+                            date: new Date(year, month - 1, 1),
+                            total: 0,
+                            items: []
+                        };
+                    }
+                    groups[dateKey].total += amountDue;
+                    if (!groups[dateKey].items.find(item => item.id === c.id)) {
+                        groups[dateKey].items.push(c);
+                    }
+                }
+            });
+        } else {
+            // Fallback
+            const [year, month] = c.dueDate.split('-').map(Number);
+            const dateKey = `${year}-${month}`;
+            
+            if (!groups[dateKey]) {
+                groups[dateKey] = {
+                    date: new Date(year, month - 1, 1),
+                    total: 0,
+                    items: []
+                };
+            }
+            
+            const debt = isAllView ? c.amount : (c.amount - c.paidAmount);
+            groups[dateKey].total += debt;
+            groups[dateKey].items.push(c);
         }
-        
-        const debt = c.amount - c.paidAmount;
-        groups[dateKey].total += debt;
-        groups[dateKey].items.push(c);
     });
 
     return Object.values(groups).sort((a, b) => a.date.getTime() - b.date.getTime());
-  }, [contracts]);
+  }, [contracts, projectionViewType]);
 
   // Additional stats for the Projection Tab
   const projectionStats = useMemo(() => {
@@ -267,13 +484,10 @@ export default function Dashboard() {
               maxMonthVal = p.total;
               maxMonthName = getMonthName(p.date).split(' ')[0]; // just month name
           }
-
-          p.items.forEach(c => {
-              const d = new Date(c.dueDate);
-              if (d >= now && d <= next30Days) {
-                  next30Total += (c.amount - c.paidAmount);
-              }
-          });
+          
+          if (p.date >= now && p.date <= next30Days) {
+              next30Total += p.total;
+          }
       });
 
       return { next30Total, totalFuture, maxMonthVal, maxMonthName };
@@ -313,6 +527,10 @@ export default function Dashboard() {
   // Handle opening the form for a new contract
   const handleOpenNewContract = () => {
     setEditingId(null);
+    setNumInstallments(1);
+    const today = new Date().toISOString().split('T')[0];
+    const nextYear = addMonths(today, 12);
+
     setFormData({
         bank: '',
         contractNumber: '',
@@ -320,10 +538,13 @@ export default function Dashboard() {
         annualRate: 0,
         amount: 0,
         paidAmount: 0,
-        startDate: '',
-        dueDate: '',
+        startDate: today,
+        dueDate: nextYear,
         status: 'active',
-        notes: ''
+        notes: '',
+        installments: [
+            { id: Math.random().toString(36).substr(2, 9), number: 1, dueDate: nextYear, originalAmount: 0 }
+        ]
       });
     setShowForm(true);
   };
@@ -331,6 +552,19 @@ export default function Dashboard() {
   // Handle opening the form to edit an existing contract
   const handleEditContract = (contract: Contract) => {
     setEditingId(contract.id);
+    setNumInstallments(contract.installments.length || 1);
+    
+    // If legacy contract without installments, create one default
+    let currentInstallments = contract.installments;
+    if (!currentInstallments || currentInstallments.length === 0) {
+        currentInstallments = [{ 
+            id: Math.random().toString(36).substr(2, 9), 
+            number: 1, 
+            dueDate: contract.dueDate, 
+            originalAmount: contract.amount 
+        }];
+    }
+
     setFormData({
         bank: contract.bank,
         contractNumber: contract.contractNumber,
@@ -341,11 +575,61 @@ export default function Dashboard() {
         startDate: contract.startDate,
         dueDate: contract.dueDate,
         status: contract.status,
-        notes: contract.notes
+        notes: contract.notes,
+        installments: currentInstallments
     });
     // Close detail modal if open
     setSelectedContract(null); 
     setShowForm(true);
+  };
+
+  const handleGenerateInstallments = () => {
+      const amount = formData.amount || 0;
+      if (amount <= 0) return;
+      
+      const valPerInst = amount / numInstallments;
+      const startDate = formData.startDate || new Date().toISOString().split('T')[0];
+      const newInstallments: Installment[] = [];
+
+      for (let i = 0; i < numInstallments; i++) {
+          newInstallments.push({
+              id: Math.random().toString(36).substr(2, 9),
+              number: i + 1,
+              // Default to +6 months per installment roughly, or just same date
+              dueDate: addMonths(startDate, (i + 1) * 6), 
+              originalAmount: parseFloat(valPerInst.toFixed(2))
+          });
+      }
+      
+      // Adjust last installment for rounding errors
+      const currentSum = newInstallments.reduce((acc, curr) => acc + curr.originalAmount, 0);
+      const diff = amount - currentSum;
+      if (diff !== 0) {
+          newInstallments[newInstallments.length - 1].originalAmount += diff;
+      }
+
+      setFormData({
+          ...formData,
+          installments: newInstallments,
+          dueDate: newInstallments[newInstallments.length - 1].dueDate // Set final due date
+      });
+  };
+
+  const updateInstallment = (index: number, field: keyof Installment, value: any) => {
+      if (!formData.installments) return;
+      const updated = [...formData.installments];
+      updated[index] = { ...updated[index], [field]: value };
+      
+      // Auto-recalculate total amount based on installments sum
+      const newTotal = updated.reduce((acc, curr) => acc + (Number(curr.originalAmount) || 0), 0);
+      
+      setFormData({
+          ...formData,
+          installments: updated,
+          amount: newTotal,
+          // Update main due date if the last installment changes
+          dueDate: updated[updated.length - 1].dueDate
+      });
   };
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -360,11 +644,10 @@ export default function Dashboard() {
                     ...formData,
                     amount: Number(formData.amount),
                     annualRate: Number(formData.annualRate),
-                    // If editing, preserve the paidAmount from the existing contract logic (payments sum) 
-                    // unless you want to allow manual override, but here we assume payments drive the history
                     paidAmount: c.paidAmount, 
                     startDate: formData.startDate!,
                     dueDate: formData.dueDate!,
+                    installments: formData.installments
                 } as Contract;
             }
             return c;
@@ -377,26 +660,15 @@ export default function Dashboard() {
             id: Math.random().toString(36).substr(2, 9),
             annualRate: Number(formData.annualRate),
             amount: Number(formData.amount),
-            paidAmount: Number(formData.paidAmount),
+            paidAmount: Number(formData.paidAmount) || 0,
             payments: [], // Initialize empty payments
+            installments: formData.installments || []
         };
         setContracts([...contracts, newContract]);
       }
 
       setShowForm(false);
       setEditingId(null);
-      setFormData({
-        bank: '',
-        contractNumber: '',
-        indexName: 'CDI',
-        annualRate: 0,
-        amount: 0,
-        paidAmount: 0,
-        startDate: '',
-        dueDate: '',
-        status: 'active',
-        notes: ''
-      });
   };
   
   const handleAddPayment = (e: React.FormEvent) => {
@@ -457,6 +729,16 @@ export default function Dashboard() {
       });
   };
 
+  const handleRevertLastPayment = (contractId: string) => {
+      setConfirmation({
+          isOpen: true,
+          type: 'revert_payment',
+          id: contractId,
+          title: 'Reverter Pagamento',
+          message: 'Deseja reverter o último pagamento registrado neste contrato? O saldo devedor será atualizado.'
+      });
+  };
+
   const executeDelete = () => {
     if (confirmation.type === 'contract' && confirmation.id) {
         setContracts(contracts.filter(c => c.id !== confirmation.id));
@@ -483,6 +765,24 @@ export default function Dashboard() {
         setContracts(updatedContracts);
         const updatedSelected = updatedContracts.find(c => c.id === selectedContract.id) || null;
         setSelectedContract(updatedSelected);
+    } else if (confirmation.type === 'revert_payment' && confirmation.id) {
+        const updatedContracts = contracts.map(c => {
+            if (c.id === confirmation.id && c.payments.length > 0) {
+                // Get the last payment added (assuming latest is last in array)
+                const lastPayment = c.payments[c.payments.length - 1];
+                const newPaidAmount = c.paidAmount - lastPayment.amount;
+                const newPayments = c.payments.slice(0, -1);
+                
+                return {
+                    ...c,
+                    paidAmount: newPaidAmount,
+                    payments: newPayments,
+                    status: newPaidAmount >= c.amount ? 'paid' : 'active'
+                } as Contract;
+            }
+            return c;
+        });
+        setContracts(updatedContracts);
     }
     
     setConfirmation({ isOpen: false, type: null, id: null, title: '', message: '' });
@@ -498,6 +798,21 @@ export default function Dashboard() {
       setSelectedContract(null);
       setShowPaymentForm(false);
       setPaymentForm({ date: '', amount: '', note: '' });
+  };
+
+  // Helper to calculate installment status
+  const getInstallmentStatus = (inst: Installment, contract: Contract) => {
+      // Logic: Waterflow. We sum all previous installments. If total paid > sum previous, we have covered some of this one.
+      const prevInstallments = (contract.installments || [])
+        .filter(i => i.number < inst.number)
+        .reduce((sum, i) => sum + i.originalAmount, 0);
+      
+      const totalPaid = contract.paidAmount;
+      const coverage = totalPaid - prevInstallments;
+
+      if (coverage >= inst.originalAmount) return 'paid';
+      if (coverage > 0) return 'partial';
+      return 'pending';
   };
 
   return (
@@ -732,6 +1047,7 @@ export default function Dashboard() {
             </div>
         )}
 
+        {/* ... existing 'contracts' tab code ... */}
         {activeTab === 'contracts' && (
             <div className="space-y-6 animate-fade-in">
                 {/* Filters / Toolbar */}
@@ -817,7 +1133,12 @@ export default function Dashboard() {
                             filteredContracts.map(contract => {
                                 const progress = contract.amount > 0 ? (contract.paidAmount / contract.amount) * 100 : 0;
                                 const daysRemaining = getDaysRemaining(contract.dueDate);
-                                const totalAnnualRatePercent = contract.indexName === 'Prefixado' ? contract.annualRate : (contract.annualRate / 100) * currentCDI;
+                                const totalAnnualRatePercent = contract.indexName === 'Prefixado' 
+                                    ? contract.annualRate 
+                                    : contract.indexName === 'Sem Indexador'
+                                        ? 0
+                                        : (contract.annualRate / 100) * currentCDI;
+                                const status = getContractDisplayStatus(contract);
 
                                 return (
                                     <div key={contract.id} className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 hover:shadow-lg transition-all duration-300 group">
@@ -832,8 +1153,10 @@ export default function Dashboard() {
                                                 </div>
                                             </div>
                                             <div className={`px-2 py-1 rounded-full text-[10px] font-bold uppercase tracking-wide 
-                                                ${contract.status === 'paid' ? 'bg-emerald-100 text-emerald-700' : 'bg-blue-100 text-blue-700'}`}>
-                                                {contract.status === 'paid' ? 'Liquidado' : 'Ativo'}
+                                                ${status === 'liquidado' ? 'bg-emerald-100 text-emerald-700' : 
+                                                  status === 'vencido' ? 'bg-red-100 text-red-700' : 
+                                                  'bg-blue-100 text-blue-700'}`}>
+                                                {status === 'liquidado' ? 'Liquidado' : status === 'vencido' ? 'Vencido' : 'Ativo'}
                                             </div>
                                         </div>
 
@@ -848,7 +1171,7 @@ export default function Dashboard() {
                                                 </div>
                                                 <div className="w-full bg-slate-200 rounded-full h-1.5 mt-2">
                                                     <div 
-                                                        className={`h-full rounded-full ${contract.status === 'paid' ? 'bg-emerald-500' : 'bg-blue-500'}`}
+                                                        className={`h-full rounded-full ${status === 'liquidado' ? 'bg-emerald-500' : 'bg-blue-500'}`}
                                                         style={{width: `${progress}%`}}
                                                     ></div>
                                                 </div>
@@ -859,10 +1182,14 @@ export default function Dashboard() {
                                                     <p className="text-[10px] text-slate-400 uppercase font-bold">Taxa Efetiva</p>
                                                     <p className="text-sm font-semibold text-slate-700 flex items-center">
                                                         <TrendingUp size={14} className="mr-1 text-slate-400"/>
-                                                        {totalAnnualRatePercent.toFixed(2)}% a.a.
+                                                        {contract.indexName === 'Sem Indexador' ? 'Isento' : `${totalAnnualRatePercent.toFixed(2)}% a.a.`}
                                                     </p>
                                                     <p className="text-[10px] text-slate-400">
-                                                        {contract.indexName === 'Prefixado' ? 'Taxa Fixa' : `${contract.annualRate}% do ${contract.indexName}`}
+                                                        {contract.indexName === 'Prefixado' 
+                                                            ? 'Taxa Fixa' 
+                                                            : contract.indexName === 'Sem Indexador'
+                                                                ? '-'
+                                                                : `${contract.annualRate}% do ${contract.indexName}`}
                                                     </p>
                                                 </div>
                                                 <div>
@@ -871,8 +1198,8 @@ export default function Dashboard() {
                                                         <Calendar size={14} className="mr-1 text-slate-400"/>
                                                         {new Date(contract.dueDate).toLocaleDateString('pt-BR')}
                                                     </p>
-                                                    <p className={`text-[10px] ${daysRemaining < 30 ? 'text-orange-500 font-bold' : 'text-slate-400'}`}>
-                                                        {contract.status === 'paid' ? 'Finalizado' : `${daysRemaining} dias restantes`}
+                                                    <p className={`text-[10px] ${daysRemaining < 30 && status !== 'liquidado' ? 'text-orange-500 font-bold' : 'text-slate-400'}`}>
+                                                        {status === 'liquidado' ? 'Finalizado' : `${daysRemaining} dias restantes`}
                                                     </p>
                                                 </div>
                                             </div>
@@ -891,6 +1218,15 @@ export default function Dashboard() {
                                             >
                                                 Detalhes
                                             </button>
+                                            {contract.payments.length > 0 && (
+                                                <button 
+                                                    onClick={() => handleRevertLastPayment(contract.id)}
+                                                    className="p-2 text-amber-500 hover:text-amber-700 hover:bg-amber-50 rounded-lg transition"
+                                                    title="Reverter Último Pagamento"
+                                                >
+                                                    <RotateCcw size={18} />
+                                                </button>
+                                            )}
                                             <button 
                                                 onClick={() => handleDelete(contract.id)}
                                                 className="p-2 text-red-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition"
@@ -910,6 +1246,7 @@ export default function Dashboard() {
                                 <tr>
                                     <th className="p-4 text-xs font-semibold text-slate-500 uppercase">Banco</th>
                                     <th className="p-4 text-xs font-semibold text-slate-500 uppercase min-w-[200px]">Valor & Progresso</th>
+                                    <th className="p-4 text-xs font-semibold text-slate-500 uppercase w-24">Status</th>
                                     <th className="p-4 text-xs font-semibold text-slate-500 uppercase">Taxa</th>
                                     <th className="p-4 text-xs font-semibold text-slate-500 uppercase">Vencimento</th>
                                     <th className="p-4 text-xs font-semibold text-slate-500 uppercase text-right">Ações</th>
@@ -918,13 +1255,14 @@ export default function Dashboard() {
                             <tbody className="divide-y divide-slate-100">
                                 {filteredContracts.length === 0 ? (
                                     <tr>
-                                        <td colSpan={5} className="p-8 text-center text-slate-400 text-sm">
+                                        <td colSpan={6} className="p-8 text-center text-slate-400 text-sm">
                                             Nenhum contrato encontrado.
                                         </td>
                                     </tr>
                                 ) : (
                                     filteredContracts.map(contract => {
                                         const progress = contract.amount > 0 ? (contract.paidAmount / contract.amount) * 100 : 0;
+                                        const status = getContractDisplayStatus(contract);
                                         return (
                                         <tr key={contract.id} className="hover:bg-slate-50">
                                             <td className="p-4">
@@ -940,14 +1278,26 @@ export default function Dashboard() {
                                                     </div>
                                                     <div className="w-full bg-slate-100 rounded-full h-1.5 overflow-hidden">
                                                         <div 
-                                                            className={`h-full rounded-full transition-all duration-500 ${contract.status === 'paid' ? 'bg-emerald-500' : 'bg-blue-500'}`}
+                                                            className={`h-full rounded-full transition-all duration-500 ${status === 'liquidado' ? 'bg-emerald-500' : 'bg-blue-500'}`}
                                                             style={{width: `${progress}%`}}
                                                         ></div>
                                                     </div>
                                                 </div>
                                             </td>
+                                            <td className="p-4">
+                                                 <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border
+                                                    ${status === 'liquidado' ? 'bg-emerald-50 text-emerald-700 border-emerald-100' : 
+                                                      status === 'vencido' ? 'bg-red-50 text-red-700 border-red-100' : 
+                                                      'bg-blue-50 text-blue-700 border-blue-100'}`}>
+                                                    {status === 'liquidado' ? 'Liquidado' : status === 'vencido' ? 'Vencido' : 'Ativo'}
+                                                </span>
+                                            </td>
                                             <td className="p-4 text-sm text-slate-600">
-                                                {contract.indexName === 'Prefixado' ? `${contract.annualRate}%` : `${contract.annualRate}% ${contract.indexName}`}
+                                                {contract.indexName === 'Prefixado' 
+                                                    ? `${contract.annualRate}%` 
+                                                    : contract.indexName === 'Sem Indexador'
+                                                        ? 'Isento'
+                                                        : `${contract.annualRate}% ${contract.indexName}`}
                                             </td>
                                             <td className="p-4 text-sm text-slate-600">
                                                 {new Date(contract.dueDate).toLocaleDateString('pt-BR')}
@@ -960,6 +1310,15 @@ export default function Dashboard() {
                                                 >
                                                     <Eye size={18} />
                                                 </button>
+                                                {contract.payments.length > 0 && (
+                                                    <button 
+                                                        onClick={() => handleRevertLastPayment(contract.id)}
+                                                        className="text-slate-400 hover:text-amber-500 p-1"
+                                                        title="Reverter Último Pagamento"
+                                                    >
+                                                        <RotateCcw size={18} />
+                                                    </button>
+                                                )}
                                                 <button onClick={() => handleDelete(contract.id)} className="text-slate-400 hover:text-red-500 p-1">
                                                     <Trash2 size={18} />
                                                 </button>
@@ -974,9 +1333,42 @@ export default function Dashboard() {
             </div>
         )}
         
+        {/* ... existing 'projection' tab code ... */}
         {activeTab === 'projection' && (
             <div className="space-y-8 animate-fade-in">
                 
+                {/* Header with Filter */}
+                <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                    <div>
+                        <h2 className="text-xl font-bold text-slate-800">Fluxo de Caixa</h2>
+                        <p className="text-sm text-slate-500">Projeção e acompanhamento de pagamentos futuros.</p>
+                    </div>
+                    <div className="bg-white p-1 rounded-lg border border-slate-200 flex items-center shadow-sm">
+                         <button 
+                            onClick={() => setProjectionViewType('active')}
+                            className={`px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-all ${
+                                projectionViewType === 'active' 
+                                ? 'bg-emerald-50 text-emerald-700 shadow-sm border border-emerald-100' 
+                                : 'text-slate-500 hover:bg-slate-50'
+                            }`}
+                        >
+                            <Filter size={14} />
+                            A Pagar
+                        </button>
+                        <button 
+                            onClick={() => setProjectionViewType('all')}
+                            className={`px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-2 transition-all ${
+                                projectionViewType === 'all' 
+                                ? 'bg-blue-50 text-blue-700 shadow-sm border border-blue-100' 
+                                : 'text-slate-500 hover:bg-slate-50'
+                            }`}
+                        >
+                            <Layers size={14} />
+                            Visão Total
+                        </button>
+                    </div>
+                </div>
+
                 {/* Summary Cards for Projection */}
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                     <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 flex flex-col justify-between relative overflow-hidden">
@@ -1016,11 +1408,126 @@ export default function Dashboard() {
                     </div>
                 </div>
 
+                {/* Monthly Detail Section */}
+                <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
+                    <div className="flex flex-col md:flex-row items-center justify-between mb-6 gap-4">
+                        <h3 className="text-lg font-bold text-slate-800 flex items-center">
+                            <CalendarDays size={20} className="mr-2 text-emerald-600" />
+                            Detalhamento Mensal
+                        </h3>
+                        
+                        <div className="flex items-center gap-2">
+                             <select 
+                                value={projectionMonth} 
+                                onChange={(e) => setProjectionMonth(parseInt(e.target.value))}
+                                className="bg-slate-50 border border-slate-200 text-slate-700 text-sm rounded-lg focus:ring-emerald-500 focus:border-emerald-500 block p-2 outline-none"
+                            >
+                                {getMonthOptions().map(m => (
+                                    <option key={m.value} value={m.value}>{m.label}</option>
+                                ))}
+                            </select>
+                            <select 
+                                value={projectionYear} 
+                                onChange={(e) => setProjectionYear(parseInt(e.target.value))}
+                                className="bg-slate-50 border border-slate-200 text-slate-700 text-sm rounded-lg focus:ring-emerald-500 focus:border-emerald-500 block p-2 outline-none"
+                            >
+                                {[...Array(10)].map((_, i) => {
+                                    const y = new Date().getFullYear() - 2 + i;
+                                    return <option key={y} value={y}>{y}</option>
+                                })}
+                            </select>
+                        </div>
+                    </div>
+
+                    <div className="rounded-xl border border-slate-200 overflow-hidden">
+                         <table className="w-full text-left">
+                            <thead className="bg-slate-50 border-b border-slate-200">
+                                <tr>
+                                    <th className="p-3 text-xs font-semibold text-slate-500 uppercase w-16 text-center">Dia</th>
+                                    <th className="p-3 text-xs font-semibold text-slate-500 uppercase">Banco / Contrato</th>
+                                    <th className="p-3 text-xs font-semibold text-slate-500 uppercase">Descrição</th>
+                                    <th className="p-3 text-xs font-semibold text-slate-500 uppercase text-right">
+                                        {projectionViewType === 'active' ? 'Valor a Pagar' : 'Valor Total'}
+                                    </th>
+                                    <th className="p-3 text-xs font-semibold text-slate-500 uppercase text-center w-24">Ação</th>
+                                </tr>
+                            </thead>
+                            <tbody className="divide-y divide-slate-100">
+                                {detailedMonthlyData.length > 0 ? (
+                                    detailedMonthlyData.map((item) => (
+                                        <tr key={item.id} className="hover:bg-slate-50 group transition">
+                                            <td className="p-3 text-center">
+                                                <div className="inline-flex flex-col items-center justify-center w-10 h-10 rounded-lg bg-emerald-50 text-emerald-700 font-bold border border-emerald-100">
+                                                    <span className="text-lg leading-none">{item.day}</span>
+                                                </div>
+                                            </td>
+                                            <td className="p-3">
+                                                <div className="font-bold text-slate-700 text-sm">{item.bank}</div>
+                                                <div className="text-xs text-slate-400 font-mono">{item.contractNumber}</div>
+                                            </td>
+                                            <td className="p-3 text-sm text-slate-600">
+                                                {item.description}
+                                                {item.status === 'partial' && (
+                                                    <span className="ml-2 inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-bold bg-yellow-100 text-yellow-700">
+                                                        Parcial
+                                                    </span>
+                                                )}
+                                                {item.status === 'paid' && projectionViewType === 'all' && (
+                                                     <span className="ml-2 inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-bold bg-emerald-100 text-emerald-700">
+                                                        Pago
+                                                    </span>
+                                                )}
+                                            </td>
+                                            <td className="p-3 text-right">
+                                                <div className={`font-bold ${item.status === 'paid' && projectionViewType === 'all' ? 'text-emerald-600 line-through opacity-75' : 'text-slate-800'}`}>
+                                                    {formatCurrency(projectionViewType === 'active' ? item.remainingAmount : item.totalAmount)}
+                                                </div>
+                                                {item.status === 'partial' && projectionViewType === 'active' && (
+                                                    <div className="text-[10px] text-slate-400">Total: {formatCurrency(item.totalAmount)}</div>
+                                                )}
+                                            </td>
+                                            <td className="p-3 text-center">
+                                                <button 
+                                                    onClick={() => setSelectedContract(item.contract)}
+                                                    className="p-1.5 text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-lg transition"
+                                                    title="Ver Detalhes do Contrato"
+                                                >
+                                                    <ArrowRight size={16} />
+                                                </button>
+                                            </td>
+                                        </tr>
+                                    ))
+                                ) : (
+                                    <tr>
+                                        <td colSpan={5} className="p-8 text-center text-slate-400">
+                                            <div className="flex flex-col items-center justify-center">
+                                                <CheckCircle2 size={32} className="mb-2 text-slate-200" />
+                                                <p className="text-sm font-medium">Nenhum pagamento previsto para este mês.</p>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                )}
+                            </tbody>
+                            {detailedMonthlyData.length > 0 && (
+                                <tfoot className="bg-slate-50 border-t border-slate-200">
+                                    <tr>
+                                        <td colSpan={3} className="p-3 text-right text-xs font-bold text-slate-500 uppercase">Total do Mês:</td>
+                                        <td className="p-3 text-right text-sm font-bold text-emerald-700">
+                                            {formatCurrency(detailedMonthlyData.reduce((acc, curr) => acc + (projectionViewType === 'active' ? curr.remainingAmount : curr.totalAmount), 0))}
+                                        </td>
+                                        <td></td>
+                                    </tr>
+                                </tfoot>
+                            )}
+                        </table>
+                    </div>
+                </div>
+
                 <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
                     <h3 className="text-lg font-bold text-slate-800 mb-6 flex items-center justify-between">
                         <div className="flex items-center">
                             <CalendarRange size={20} className="mr-2 text-emerald-600" />
-                            Fluxo de Caixa Projetado
+                            Fluxo de Caixa Projetado (Visão Geral)
                         </div>
                         <span className="text-xs font-normal text-slate-400">Mensal vs Acumulado</span>
                     </h3>
@@ -1083,78 +1590,6 @@ export default function Dashboard() {
                             </ResponsiveContainer>
                         </div>
                     )}
-                    
-                    {projectionData.length === 0 ? (
-                         <div className="text-center py-12">
-                            <div className="bg-slate-50 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4 text-slate-300">
-                                <CalendarRange size={32} />
-                            </div>
-                            <p className="text-slate-500 font-medium">Nenhum pagamento futuro encontrado.</p>
-                            <p className="text-xs text-slate-400 mt-1">Seus contratos ativos aparecerão aqui organizados por vencimento.</p>
-                        </div>
-                    ) : (
-                        <div className="space-y-8 mt-8">
-                            {projectionData.map((group, groupIndex) => (
-                                <div key={groupIndex} className="relative">
-                                    <div className="flex items-center mb-4 sticky top-20 bg-white/95 backdrop-blur-sm z-10 py-2 border-b border-slate-100">
-                                        <div className="bg-emerald-100 text-emerald-700 px-3 py-1 rounded-lg text-sm font-bold mr-3">
-                                            {getMonthName(group.date)}
-                                        </div>
-                                        <div className="h-px flex-1 bg-slate-100"></div>
-                                        <span className="text-xs text-slate-400 font-medium ml-3">Total do Mês: <span className="text-slate-700 font-bold">{formatCurrency(group.total)}</span></span>
-                                    </div>
-
-                                    <div className="space-y-3 pl-2">
-                                        {group.items.map(contract => {
-                                            const isOverdue = new Date(contract.dueDate) < new Date() && new Date(contract.dueDate).toDateString() !== new Date().toDateString();
-                                            const daysDiff = Math.ceil((new Date(contract.dueDate).getTime() - new Date().getTime()) / (1000 * 3600 * 24));
-                                            
-                                            return (
-                                                <div key={contract.id} className="flex items-center group relative pl-6 pb-2">
-                                                    {/* Timeline connector */}
-                                                    <div className={`absolute left-0 top-0 bottom-0 w-0.5 ${isOverdue ? 'bg-red-200' : 'bg-slate-200'} group-last:bottom-auto group-last:h-full`}></div>
-                                                    <div className={`absolute left-[-5px] top-1/2 -translate-y-1/2 w-3 h-3 rounded-full border-2 border-white shadow-sm ${isOverdue ? 'bg-red-500' : 'bg-emerald-500'}`}></div>
-
-                                                    <div className={`flex-1 bg-white border ${isOverdue ? 'border-red-200' : 'border-slate-200'} rounded-xl p-4 hover:shadow-md transition-all flex flex-col md:flex-row md:items-center justify-between gap-4 ml-4`}>
-                                                        <div className="flex items-center gap-4">
-                                                             <div className="h-10 w-10 rounded-lg bg-slate-50 border border-slate-100 flex items-center justify-center text-slate-600 font-bold text-xs">
-                                                                {contract.bank.substring(0, 3).toUpperCase()}
-                                                            </div>
-                                                            <div>
-                                                                <div className="flex items-center gap-2">
-                                                                    <h5 className="font-bold text-slate-800 text-sm">{contract.bank}</h5>
-                                                                    {isOverdue && <span className="text-[10px] font-bold bg-red-100 text-red-600 px-1.5 py-0.5 rounded">Vencido</span>}
-                                                                </div>
-                                                                <div className="text-xs text-slate-500 flex items-center mt-0.5">
-                                                                    <span>{contract.contractNumber}</span>
-                                                                    <span className="mx-1.5">•</span>
-                                                                    <span>{new Date(contract.dueDate).getDate()} de {getMonthName(group.date).split(' ')[0]}</span>
-                                                                </div>
-                                                            </div>
-                                                        </div>
-
-                                                        <div className="flex items-center gap-6">
-                                                            <div className="text-right">
-                                                                <p className="text-[10px] text-slate-400 uppercase font-medium">A Liquidar</p>
-                                                                <p className="text-sm font-bold text-slate-800">{formatCurrency(contract.amount - contract.paidAmount)}</p>
-                                                            </div>
-                                                            <button 
-                                                                onClick={() => setSelectedContract(contract)}
-                                                                className="p-2 text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-lg transition"
-                                                                title="Ver Detalhes"
-                                                            >
-                                                                <ArrowRight size={18} />
-                                                            </button>
-                                                        </div>
-                                                    </div>
-                                                </div>
-                                            );
-                                        })}
-                                    </div>
-                                </div>
-                            ))}
-                        </div>
-                    )}
                 </div>
             </div>
         )}
@@ -1162,9 +1597,9 @@ export default function Dashboard() {
 
       {/* Add/Edit Modal Overlay */}
       {showForm && (
-          <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4 backdrop-blur-sm animate-fade-in">
-              <div className="bg-white rounded-2xl shadow-xl w-full max-w-2xl overflow-hidden">
-                  <div className="bg-slate-50 p-6 border-b border-slate-100 flex justify-between items-center">
+          <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4 backdrop-blur-sm animate-fade-in overflow-y-auto">
+              <div className="bg-white rounded-2xl shadow-xl w-full max-w-2xl overflow-hidden my-8">
+                  <div className="bg-slate-50 p-6 border-b border-slate-100 flex justify-between items-center sticky top-0 z-10">
                       <div className="flex items-center space-x-2">
                         <div className="bg-emerald-100 text-emerald-600 p-2 rounded-lg">
                             <CreditCard size={20} />
@@ -1179,6 +1614,7 @@ export default function Dashboard() {
                   </div>
                   
                   <form onSubmit={handleSubmit} className="p-6 grid grid-cols-1 md:grid-cols-2 gap-6">
+                        {/* Basic Info */}
                         <div className="col-span-2 md:col-span-1">
                             <label className="block text-sm font-medium text-slate-700 mb-1">Instituição Financeira</label>
                             <input 
@@ -1203,23 +1639,123 @@ export default function Dashboard() {
                         </div>
                         
                         <div className="col-span-2 md:col-span-1">
-                            <label className="block text-sm font-medium text-slate-700 mb-1">Valor Original (R$)</label>
-                            <div className="relative">
-                                <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">R$</span>
+                            <label className="block text-sm font-medium text-slate-700 mb-1">Data Início (Emissão)</label>
+                            <input 
+                                required
+                                type="date"
+                                className="w-full border border-slate-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-emerald-500 outline-none transition"
+                                value={formData.startDate}
+                                onChange={e => setFormData({...formData, startDate: e.target.value})}
+                            />
+                        </div>
+
+                         <div className="col-span-2 md:col-span-1">
+                            <label className="block text-sm font-medium text-slate-700 mb-1">Indexador / Taxa</label>
+                             <div className="flex gap-2">
+                                <select 
+                                    className="w-1/2 border border-slate-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-emerald-500 outline-none bg-white transition text-sm"
+                                    value={formData.indexName}
+                                    onChange={e => {
+                                        const newVal = e.target.value;
+                                        setFormData({
+                                            ...formData, 
+                                            indexName: newVal as any,
+                                            annualRate: newVal === 'Sem Indexador' ? 0 : formData.annualRate
+                                        });
+                                    }}
+                                >
+                                    <option value="CDI">CDI</option>
+                                    <option value="Prefixado">Prefixado</option>
+                                    <option value="IPCA">IPCA</option>
+                                    <option value="Selic">Selic</option>
+                                    <option value="Sem Indexador">Sem Indexador</option>
+                                </select>
                                 <input 
                                     required
                                     type="number"
-                                    className="w-full border border-slate-300 rounded-lg pl-9 pr-3 py-2 focus:ring-2 focus:ring-emerald-500 outline-none transition"
-                                    placeholder="0,00"
-                                    value={formData.amount || ''}
-                                    onChange={e => setFormData({...formData, amount: parseFloat(e.target.value)})}
+                                    step="0.01"
+                                    disabled={formData.indexName === 'Sem Indexador'}
+                                    className={`w-1/2 border border-slate-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-emerald-500 outline-none transition text-sm ${formData.indexName === 'Sem Indexador' ? 'bg-slate-100 text-slate-400' : ''}`}
+                                    placeholder={formData.indexName === 'Prefixado' ? '12.5' : '100'}
+                                    value={formData.annualRate || ''}
+                                    onChange={e => setFormData({...formData, annualRate: parseFloat(e.target.value)})}
                                 />
                             </div>
                         </div>
-                        
+
+                        {/* Installment Configuration Section */}
+                        <div className="col-span-2 border-t border-b border-slate-100 py-4 my-2">
+                            <div className="flex items-center justify-between mb-4">
+                                <h4 className="text-sm font-bold text-slate-800 flex items-center">
+                                    <Calculator size={16} className="mr-2 text-slate-400" />
+                                    Configuração de Parcelas
+                                </h4>
+                                <div className="text-xs text-slate-500">
+                                    Total: <span className="font-bold text-emerald-600">{formatCurrency(formData.amount || 0)}</span>
+                                </div>
+                            </div>
+                            
+                            <div className="flex items-end gap-3 mb-4">
+                                <div className="flex-1">
+                                    <label className="block text-xs font-medium text-slate-500 mb-1">Valor Total do Contrato (R$)</label>
+                                    <input 
+                                        type="number"
+                                        className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-emerald-500 outline-none"
+                                        value={formData.amount || ''}
+                                        onChange={e => setFormData({...formData, amount: parseFloat(e.target.value)})}
+                                    />
+                                </div>
+                                <div className="w-24">
+                                    <label className="block text-xs font-medium text-slate-500 mb-1">Nº Parcelas</label>
+                                    <input 
+                                        type="number"
+                                        min="1"
+                                        max="60"
+                                        className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-emerald-500 outline-none"
+                                        value={numInstallments}
+                                        onChange={e => setNumInstallments(parseInt(e.target.value) || 1)}
+                                    />
+                                </div>
+                                <button 
+                                    type="button"
+                                    onClick={handleGenerateInstallments}
+                                    className="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-lg text-sm font-medium transition h-[38px] flex items-center"
+                                >
+                                    Gerar
+                                </button>
+                            </div>
+
+                            {/* Dynamic Inputs for Installments */}
+                            <div className="bg-slate-50 rounded-xl border border-slate-200 p-3 max-h-48 overflow-y-auto space-y-2">
+                                {(formData.installments || []).map((inst, idx) => (
+                                    <div key={inst.id} className="flex items-center gap-2">
+                                        <span className="text-xs font-bold text-slate-400 w-6">#{inst.number}</span>
+                                        <input 
+                                            type="date"
+                                            className="flex-1 border border-slate-200 rounded-md px-2 py-1.5 text-xs focus:ring-1 focus:ring-emerald-500 outline-none"
+                                            value={inst.dueDate}
+                                            onChange={(e) => updateInstallment(idx, 'dueDate', e.target.value)}
+                                        />
+                                        <div className="relative flex-1">
+                                            <span className="absolute left-2 top-1/2 -translate-y-1/2 text-slate-400 text-[10px]">R$</span>
+                                            <input 
+                                                type="number"
+                                                className="w-full border border-slate-200 rounded-md pl-6 pr-2 py-1.5 text-xs focus:ring-1 focus:ring-emerald-500 outline-none"
+                                                value={inst.originalAmount}
+                                                onChange={(e) => updateInstallment(idx, 'originalAmount', parseFloat(e.target.value))}
+                                            />
+                                        </div>
+                                    </div>
+                                ))}
+                                {(!formData.installments || formData.installments.length === 0) && (
+                                    <p className="text-xs text-center text-slate-400 py-2">Clique em "Gerar" para criar as parcelas.</p>
+                                )}
+                            </div>
+                        </div>
+
                         {!editingId && (
                         <div className="col-span-2 md:col-span-1">
-                            <label className="block text-sm font-medium text-slate-700 mb-1">Valor Já Pago (R$)</label>
+                            <label className="block text-sm font-medium text-slate-700 mb-1">Valor Já Pago (Saldo Inicial)</label>
                             <div className="relative">
                                 <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">R$</span>
                                 <input 
@@ -1232,55 +1768,6 @@ export default function Dashboard() {
                             </div>
                         </div>
                         )}
-
-                        <div className="col-span-2 md:col-span-1">
-                            <label className="block text-sm font-medium text-slate-700 mb-1">Indexador</label>
-                            <select 
-                                className="w-full border border-slate-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-emerald-500 outline-none bg-white transition"
-                                value={formData.indexName}
-                                onChange={e => setFormData({...formData, indexName: e.target.value as any})}
-                            >
-                                <option value="CDI">CDI</option>
-                                <option value="Prefixado">Prefixado</option>
-                                <option value="IPCA">IPCA</option>
-                                <option value="Selic">Selic</option>
-                            </select>
-                        </div>
-                        <div className="col-span-2 md:col-span-1">
-                            <label className="block text-sm font-medium text-slate-700 mb-1">
-                                {formData.indexName === 'Prefixado' ? 'Taxa Anual (%)' : `% do ${formData.indexName}`}
-                            </label>
-                            <input 
-                                required
-                                type="number"
-                                step="0.01"
-                                className="w-full border border-slate-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-emerald-500 outline-none transition"
-                                placeholder={formData.indexName === 'Prefixado' ? '12.5' : '100'}
-                                value={formData.annualRate || ''}
-                                onChange={e => setFormData({...formData, annualRate: parseFloat(e.target.value)})}
-                            />
-                        </div>
-
-                        <div className="col-span-2 md:col-span-1">
-                            <label className="block text-sm font-medium text-slate-700 mb-1">Data Início</label>
-                            <input 
-                                required
-                                type="date"
-                                className="w-full border border-slate-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-emerald-500 outline-none transition"
-                                value={formData.startDate}
-                                onChange={e => setFormData({...formData, startDate: e.target.value})}
-                            />
-                        </div>
-                        <div className="col-span-2 md:col-span-1">
-                            <label className="block text-sm font-medium text-slate-700 mb-1">Vencimento Final</label>
-                            <input 
-                                required
-                                type="date"
-                                className="w-full border border-slate-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-emerald-500 outline-none transition"
-                                value={formData.dueDate}
-                                onChange={e => setFormData({...formData, dueDate: e.target.value})}
-                            />
-                        </div>
                         
                         <div className="col-span-2">
                              <label className="block text-sm font-medium text-slate-700 mb-1">Observações / Destinação</label>
@@ -1293,7 +1780,7 @@ export default function Dashboard() {
                              />
                         </div>
 
-                        <div className="col-span-2 mt-4 pt-4 border-t border-slate-100 flex justify-end space-x-3">
+                        <div className="col-span-2 mt-4 pt-4 border-t border-slate-100 flex justify-end space-x-3 sticky bottom-0 bg-white py-2">
                             <button 
                                 type="button"
                                 onClick={() => setShowForm(false)}
@@ -1388,7 +1875,7 @@ export default function Dashboard() {
                     </div>
 
                     {/* Detailed Grid */}
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-6">
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-6 mb-8">
                         <div>
                             <h4 className="text-sm font-bold text-slate-800 border-b border-slate-100 pb-2 mb-4 flex items-center">
                                 <Percent size={16} className="mr-2 text-slate-400" />
@@ -1402,7 +1889,7 @@ export default function Dashboard() {
                                 <div className="flex justify-between">
                                     <span className="text-sm text-slate-500">Taxa Contratada</span>
                                     <span className="text-sm font-medium text-slate-800">
-                                        {selectedContract.indexName === 'Prefixado' ? `${selectedContract.annualRate}% a.a.` : `${selectedContract.annualRate}% do CDI`}
+                                        {selectedContract.indexName === 'Prefixado' ? `${selectedContract.annualRate}% a.a.` : selectedContract.indexName === 'Sem Indexador' ? 'Isento' : `${selectedContract.annualRate}% do CDI`}
                                     </span>
                                 </div>
                                 <div className="flex justify-between">
@@ -1410,7 +1897,9 @@ export default function Dashboard() {
                                     <span className="text-sm font-bold text-emerald-600">
                                          {selectedContract.indexName === 'Prefixado' 
                                             ? selectedContract.annualRate.toFixed(2) 
-                                            : ((selectedContract.annualRate / 100) * currentCDI).toFixed(2)}% a.a.
+                                            : selectedContract.indexName === 'Sem Indexador'
+                                                ? 'Isento'
+                                                : ((selectedContract.annualRate / 100) * currentCDI).toFixed(2)}% a.a.
                                     </span>
                                 </div>
                             </div>
@@ -1439,13 +1928,75 @@ export default function Dashboard() {
                             </div>
                         </div>
                     </div>
+
+                    {/* Installments Schedule */}
+                    <div className="mb-8">
+                        <h4 className="text-sm font-bold text-slate-800 border-b border-slate-100 pb-2 mb-4 flex items-center justify-between">
+                            <div className="flex items-center">
+                                <CalendarRange size={16} className="mr-2 text-slate-400" />
+                                Cronograma de Parcelas
+                            </div>
+                        </h4>
+                        <div className="bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm">
+                            <table className="w-full text-left">
+                                <thead className="bg-slate-50 border-b border-slate-200">
+                                    <tr>
+                                        <th className="p-3 text-xs font-semibold text-slate-500 uppercase w-12 text-center">#</th>
+                                        <th className="p-3 text-xs font-semibold text-slate-500 uppercase">Vencimento</th>
+                                        <th className="p-3 text-xs font-semibold text-slate-500 uppercase text-right">Valor Original</th>
+                                        <th className="p-3 text-xs font-semibold text-slate-500 uppercase text-center">Status</th>
+                                    </tr>
+                                </thead>
+                                <tbody className="divide-y divide-slate-100">
+                                    {(selectedContract.installments || []).sort((a,b) => a.number - b.number).map((inst) => {
+                                        const status = getInstallmentStatus(inst, selectedContract);
+                                        return (
+                                            <tr key={inst.id} className="hover:bg-slate-50">
+                                                <td className="p-3 text-sm text-slate-400 font-medium text-center">{inst.number}</td>
+                                                <td className="p-3 text-sm text-slate-700">
+                                                    {new Date(inst.dueDate).toLocaleDateString('pt-BR')}
+                                                </td>
+                                                <td className="p-3 text-sm font-medium text-slate-700 text-right">
+                                                    {formatCurrency(inst.originalAmount)}
+                                                </td>
+                                                <td className="p-3 text-center">
+                                                    {status === 'paid' && (
+                                                        <span className="inline-flex items-center px-2 py-1 rounded-md text-[10px] font-bold bg-emerald-100 text-emerald-700">
+                                                            PAGO
+                                                        </span>
+                                                    )}
+                                                    {status === 'partial' && (
+                                                        <span className="inline-flex items-center px-2 py-1 rounded-md text-[10px] font-bold bg-yellow-100 text-yellow-700">
+                                                            PARCIAL
+                                                        </span>
+                                                    )}
+                                                    {status === 'pending' && (
+                                                        <span className="inline-flex items-center px-2 py-1 rounded-md text-[10px] font-bold bg-slate-100 text-slate-500">
+                                                            PENDENTE
+                                                        </span>
+                                                    )}
+                                                </td>
+                                            </tr>
+                                        );
+                                    })}
+                                    {(!selectedContract.installments || selectedContract.installments.length === 0) && (
+                                        <tr>
+                                            <td colSpan={4} className="p-4 text-center text-xs text-slate-400">
+                                                Cronograma não configurado.
+                                            </td>
+                                        </tr>
+                                    )}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
                     
                     {/* Payment History */}
                     <div className="mt-8">
                         <div className="flex justify-between items-center mb-4 border-b border-slate-100 pb-2">
                             <h4 className="text-sm font-bold text-slate-800 flex items-center">
                                 <History size={16} className="mr-2 text-slate-400" />
-                                Histórico de Pagamentos
+                                Histórico de Pagamentos (Realizado)
                             </h4>
                             <div className="flex gap-2">
                                 <button 
@@ -1487,7 +2038,7 @@ export default function Dashboard() {
                                 </div>
                                 <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-3">
                                     <div>
-                                        <label className="block text-xs font-medium text-slate-500 mb-1">Data</label>
+                                        <label className="block text-xs font-medium text-slate-500 mb-1">Data do Pagamento</label>
                                         <input 
                                             type="date" 
                                             required 
@@ -1497,7 +2048,7 @@ export default function Dashboard() {
                                         />
                                     </div>
                                     <div>
-                                        <label className="block text-xs font-medium text-slate-500 mb-1">Valor (R$)</label>
+                                        <label className="block text-xs font-medium text-slate-500 mb-1">Valor Pago (R$)</label>
                                         <input 
                                             type="number" 
                                             required 
@@ -1512,7 +2063,7 @@ export default function Dashboard() {
                                         <input 
                                             type="text" 
                                             className="w-full text-sm border border-slate-300 rounded-lg px-2 py-1.5 focus:ring-2 focus:ring-emerald-500 outline-none"
-                                            placeholder="Ex: Parcela 1"
+                                            placeholder="Ex: Parcela 1 com Juros"
                                             value={paymentForm.note}
                                             onChange={e => setPaymentForm({...paymentForm, note: e.target.value})}
                                         />
@@ -1536,7 +2087,7 @@ export default function Dashboard() {
                             </form>
                         )}
                         
-                        {selectedContract.payments && selectedContract.payments.length > 0 ? (
+                        {(selectedContract.payments || []).length > 0 ? (
                             <div className="bg-slate-50 rounded-xl border border-slate-100 overflow-hidden">
                                 <table className="w-full text-left">
                                     <thead className="bg-slate-100 border-b border-slate-200">
@@ -1622,7 +2173,7 @@ export default function Dashboard() {
                             onClick={executeDelete}
                             className="flex-1 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 font-medium shadow-sm transition"
                         >
-                            Excluir
+                            Confirmar
                         </button>
                     </div>
                 </div>
