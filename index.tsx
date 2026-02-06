@@ -4,15 +4,27 @@ import {
   Plus, Trash2, DollarSign, TrendingUp, Calendar, 
   PieChart as PieChartIcon, Landmark, ArrowUpRight, 
   Search, X, Save, AlertCircle, FileText, CreditCard,
-  ChevronRight, MoreVertical, LayoutGrid, List, Eye, Clock, Percent,
+  LayoutGrid, List, Eye, Clock, Percent,
   History, Pencil, CalendarRange, CheckCircle2, ArrowRight, AlertTriangle, Filter,
-  Calculator, RotateCcw, CalendarDays, Layers
+  Calculator, RotateCcw, CalendarDays, Layers, TrendingDown, BarChart3,
+  Cloud, CloudOff, Loader2, Check
 } from 'lucide-react';
 import { 
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, 
   Cell, PieChart, Pie, Legend, CartesianGrid, AreaChart, Area,
   ComposedChart, Line
 } from 'recharts';
+import { createClient } from '@supabase/supabase-js';
+
+// --- CONFIGURAÇÃO SUPABASE ---
+// Chaves configuradas
+const SUPABASE_URL = 'https://ndpgfoxycavzhqlwdrvw.supabase.co'; 
+const SUPABASE_KEY = 'sb_publishable_dPcP59CFidQ5Ha5hTwwXHA_nLvc5b8p';
+
+// Inicialização do cliente Supabase
+const supabase = (SUPABASE_URL && SUPABASE_KEY) 
+  ? createClient(SUPABASE_URL, SUPABASE_KEY) 
+  : null;
 
 // --- Types ---
 
@@ -71,9 +83,13 @@ const getMonthOptions = () => {
     return months;
 };
 
+// Fixed: Date manipulation using UTC strings to avoid Timezone shifts (Day +1 or -1 issues)
 const addMonths = (dateStr: string, months: number) => {
-    const date = new Date(dateStr);
-    date.setMonth(date.getMonth() + months);
+    if (!dateStr) return '';
+    const [y, m, d] = dateStr.split('-').map(Number);
+    // Create date using UTC to avoid timezone rollovers
+    const date = new Date(Date.UTC(y, m - 1, d));
+    date.setUTCMonth(date.getUTCMonth() + months);
     return date.toISOString().split('T')[0];
 };
 
@@ -85,8 +101,9 @@ const getContractDisplayStatus = (contract: Contract) => {
     
     const today = new Date();
     today.setHours(0,0,0,0);
-    const dueDate = new Date(contract.dueDate);
-    dueDate.setHours(0,0,0,0); // Normalize time
+    // Safe date parsing
+    const [y, m, d] = contract.dueDate.split('-').map(Number);
+    const dueDate = new Date(y, m-1, d, 12, 0, 0);
     
     if (dueDate < today) {
         return 'vencido';
@@ -184,25 +201,122 @@ const INITIAL_CONTRACTS: Contract[] = [
 // --- Components ---
 
 export default function Dashboard() {
-  // Initialize contracts from localStorage or fall back to mock data
-  const [contracts, setContracts] = useState<Contract[]>(() => {
-    try {
-        const saved = localStorage.getItem('agrofinance_contracts');
-        return saved ? JSON.parse(saved) : INITIAL_CONTRACTS;
-    } catch (e) {
-        console.error("Erro ao carregar dados:", e);
-        return INITIAL_CONTRACTS;
-    }
-  });
+  const [contracts, setContracts] = useState<Contract[]>(INITIAL_CONTRACTS);
+  const [isLoading, setIsLoading] = useState(true);
+  const [syncStatus, setSyncStatus] = useState<'synced' | 'syncing' | 'error' | 'local'>('local');
 
-  // Persist contracts changes to localStorage
+  // --- DATA LOADING LOGIC (Hybrid: Supabase first, then LocalStorage) ---
   useEffect(() => {
-    try {
+    const loadData = async () => {
+        let loaded = false;
+
+        // 1. Try Supabase
+        if (supabase) {
+            setSyncStatus('syncing');
+            try {
+                const { data, error } = await supabase
+                    .from('app_state')
+                    .select('contracts')
+                    .order('id', { ascending: true }) // Assuming single row or grabbing first
+                    .limit(1)
+                    .single();
+
+                if (error) {
+                    throw error;
+                }
+
+                if (data && data.contracts) {
+                    setContracts(data.contracts);
+                    loaded = true;
+                    setSyncStatus('synced');
+                } else {
+                    // No data yet, but connected
+                    setSyncStatus('synced');
+                }
+            } catch (err) {
+                console.error("Supabase load error (fallback to local):", err);
+                setSyncStatus('error');
+            }
+        } else {
+            setSyncStatus('local');
+        }
+
+        // 2. Fallback to LocalStorage if Supabase failed or not configured
+        if (!loaded) {
+            try {
+                const saved = localStorage.getItem('agrofinance_contracts');
+                if (saved) {
+                    setContracts(JSON.parse(saved));
+                }
+            } catch (e) {
+                console.error("Local load error:", e);
+            }
+        }
+        setIsLoading(false);
+    };
+
+    loadData();
+  }, []);
+
+  // --- DATA SAVING LOGIC ---
+  useEffect(() => {
+    if (isLoading) return; // Don't save while initial load is happening
+
+    const saveData = async () => {
+        // 1. Save to LocalStorage (Always acts as cache/offline)
         localStorage.setItem('agrofinance_contracts', JSON.stringify(contracts));
-    } catch (e) {
-        console.error("Erro ao salvar dados:", e);
-    }
-  }, [contracts]);
+
+        // 2. Save to Supabase (Sync)
+        if (supabase) {
+            setSyncStatus('syncing');
+            try {
+                // First, check if any row exists
+                const { data: existing, error: fetchError } = await supabase.from('app_state').select('id').limit(1);
+                
+                if (fetchError) throw fetchError;
+
+                if (existing && existing.length > 0) {
+                     const { error: updateError } = await supabase
+                        .from('app_state')
+                        .update({ contracts: contracts, updated_at: new Date() })
+                        .eq('id', existing[0].id);
+                     if (updateError) throw updateError;
+                } else {
+                     const { error: insertError } = await supabase
+                        .from('app_state')
+                        .insert([{ contracts: contracts }]);
+                     if (insertError) throw insertError;
+                }
+                setSyncStatus('synced');
+            } catch (err) {
+                console.error("Supabase save error:", err);
+                setSyncStatus('error');
+            }
+        }
+    };
+    
+    // Debounce save to avoid too many API calls
+    const timeoutId = setTimeout(saveData, 2000);
+    return () => clearTimeout(timeoutId);
+
+  }, [contracts, isLoading]);
+
+  // Sync across tabs (Local Only)
+  useEffect(() => {
+    const handleStorageChange = (e: StorageEvent) => {
+        if (e.key === 'agrofinance_contracts') {
+            if (e.newValue) {
+                try {
+                    setContracts(JSON.parse(e.newValue));
+                } catch (err) {
+                    console.error("Erro na sincronização:", err);
+                }
+            }
+        }
+    };
+    window.addEventListener('storage', handleStorageChange);
+    return () => window.removeEventListener('storage', handleStorageChange);
+  }, []);
 
   const [showForm, setShowForm] = useState(false);
   const [selectedContract, setSelectedContract] = useState<Contract | null>(null);
@@ -349,7 +463,6 @@ export default function Dashboard() {
 
           if (c.installments && c.installments.length > 0) {
               c.installments.forEach(inst => {
-                  const d = new Date(inst.dueDate);
                   const [y, m, day] = inst.dueDate.split('-').map(Number);
                   
                   if (y === projectionYear && (m - 1) === projectionMonth) {
@@ -363,10 +476,11 @@ export default function Dashboard() {
                       // If view is 'all', show everything (even if paid).
                       if (projectionViewType === 'active' && balance <= 0.01) return;
 
+                      // Fix: Set time to Noon (12:00) to avoid timezone shifting days
                       items.push({
                           id: `${c.id}-${inst.id}`,
                           day: day,
-                          date: new Date(y, m-1, day),
+                          date: new Date(y, m-1, day, 12, 0, 0), 
                           bank: c.bank,
                           contractNumber: c.contractNumber,
                           description: `Parcela ${inst.number}/${c.installments.length}`,
@@ -392,7 +506,7 @@ export default function Dashboard() {
                    items.push({
                        id: c.id,
                        day: day,
-                       date: new Date(y, m-1, day),
+                       date: new Date(y, m-1, day, 12, 0, 0),
                        bank: c.bank,
                        contractNumber: c.contractNumber,
                        description: 'Pagamento Único / Restante',
@@ -410,49 +524,29 @@ export default function Dashboard() {
 
   const projectionData = useMemo(() => {
     const groups: Record<string, { date: Date, total: number, items: Contract[] }> = {};
-    const isAllView = projectionViewType === 'all';
+    // Force viewType to 'active' for Cash Flow chart to show remaining debt correctly
+    const isAllView = false; 
     
-    contracts.filter(c => {
-        // If Active view: filter out paid contracts
-        if (!isAllView) return c.status !== 'paid';
-        return true;
-    }).forEach(c => {
+    contracts.filter(c => c.status !== 'paid').forEach(c => {
         if (c.installments && c.installments.length > 0) {
-            // Logic: Determine which installments are unpaid (Active view) or All installments (All view)
-            
-            // If All view, we act as if nothing is paid for the purpose of showing the schedule
-            let remainingPaid = isAllView ? 0 : c.paidAmount;
+            let remainingPaid = c.paidAmount;
             
             c.installments.forEach(inst => {
                 const instAmount = inst.originalAmount;
                 if (remainingPaid >= instAmount) {
                     remainingPaid -= instAmount;
-                    // Fully paid.
-                    // If Active view: Don't add to projection.
-                    // If All view: Add to projection (it's part of the schedule).
-                    if (isAllView) {
-                         const [year, month] = inst.dueDate.split('-').map(Number);
-                        const dateKey = `${year}-${month}`;
-                        if (!groups[dateKey]) {
-                            groups[dateKey] = { date: new Date(year, month - 1, 1), total: 0, items: [] };
-                        }
-                        groups[dateKey].total += instAmount;
-                        if (!groups[dateKey].items.find(item => item.id === c.id)) groups[dateKey].items.push(c);
-                    }
-
+                    // Fully paid. Skip for projection.
                 } else {
                     // Partially paid or unpaid
-                    // If Active view: Add remaining balance.
-                    // If All view: Add full installment amount.
-                    const amountDue = isAllView ? instAmount : (instAmount - remainingPaid);
+                    const amountDue = instAmount - remainingPaid;
                     remainingPaid = 0; 
                     
-                    const [year, month] = inst.dueDate.split('-').map(Number);
+                    const [year, month, day] = inst.dueDate.split('-').map(Number);
                     const dateKey = `${year}-${month}`;
                     
                     if (!groups[dateKey]) {
                         groups[dateKey] = {
-                            date: new Date(year, month - 1, 1),
+                            date: new Date(year, month - 1, 1, 12, 0, 0),
                             total: 0,
                             items: []
                         };
@@ -464,31 +558,34 @@ export default function Dashboard() {
                 }
             });
         } else {
-            // Fallback
-            const [year, month] = c.dueDate.split('-').map(Number);
+            // Fallback for no installments
+            const [year, month, day] = c.dueDate.split('-').map(Number);
             const dateKey = `${year}-${month}`;
             
             if (!groups[dateKey]) {
                 groups[dateKey] = {
-                    date: new Date(year, month - 1, 1),
+                    date: new Date(year, month - 1, 1, 12, 0, 0),
                     total: 0,
                     items: []
                 };
             }
             
-            const debt = isAllView ? c.amount : (c.amount - c.paidAmount);
-            groups[dateKey].total += debt;
-            groups[dateKey].items.push(c);
+            const debt = c.amount - c.paidAmount;
+            if (debt > 0.01) {
+                groups[dateKey].total += debt;
+                groups[dateKey].items.push(c);
+            }
         }
     });
 
     return Object.values(groups).sort((a, b) => a.date.getTime() - b.date.getTime());
-  }, [contracts, projectionViewType]);
+  }, [contracts]);
 
   // Additional stats for the Projection Tab
   const projectionStats = useMemo(() => {
       const now = new Date();
-      const next30Days = new Date();
+      now.setHours(0,0,0,0);
+      const next30Days = new Date(now);
       next30Days.setDate(now.getDate() + 30);
 
       let next30Total = 0;
@@ -508,21 +605,47 @@ export default function Dashboard() {
               next30Total += p.total;
           }
       });
+      
+      // Sync Total Projected with Outstanding Debt for consistency
+      if (Math.abs(totalFuture - stats.outstanding) > 1.0) {
+          totalFuture = stats.outstanding; 
+      }
 
       return { next30Total, totalFuture, maxMonthVal, maxMonthName };
-  }, [projectionData]);
+  }, [projectionData, stats.outstanding]);
 
   const cashFlowChartData = useMemo(() => {
-    let accumulated = 0;
-    return projectionData.map(p => {
-        accumulated += p.total;
-        return {
+    // Logic: Start with Total Outstanding Debt and subtract as time goes on
+    let currentBalance = stats.outstanding;
+    
+    // We need to insert a "Today" point
+    const data = [{
+        name: 'Hoje',
+        amount: 0,
+        balance: currentBalance,
+        fullDate: new Date().toLocaleDateString('pt-BR')
+    }];
+
+    projectionData.forEach(p => {
+        // Balance after this month's payments
+        currentBalance -= p.total;
+        data.push({
             name: `${getMonthName(p.date).substring(0, 3)}/${p.date.getFullYear()}`,
             amount: p.total,
-            accumulated: accumulated,
+            balance: Math.max(0, currentBalance), // Prevent negative due to rounding
             fullDate: getMonthName(p.date)
-        };
+        });
     });
+
+    return data;
+  }, [projectionData, stats.outstanding]);
+
+  const monthlyPaymentChartData = useMemo(() => {
+    return projectionData.map(p => ({
+        name: `${getMonthName(p.date).substring(0, 3)}/${p.date.getFullYear()}`,
+        amount: p.total,
+        fullDate: getMonthName(p.date)
+    }));
   }, [projectionData]);
 
   // Filtered Contracts Logic
@@ -542,6 +665,8 @@ export default function Dashboard() {
         return matchesSearch && matchesDate;
     });
   }, [contracts, searchTerm, filterStartDate, filterEndDate]);
+
+  // --- Handlers ---
 
   // Handle opening the form for a new contract
   const handleOpenNewContract = () => {
@@ -614,7 +739,7 @@ export default function Dashboard() {
           newInstallments.push({
               id: Math.random().toString(36).substr(2, 9),
               number: i + 1,
-              // Default to +6 months per installment roughly, or just same date
+              // Default to +6 months per installment roughly
               dueDate: addMonths(startDate, (i + 1) * 6), 
               originalAmount: parseFloat(valPerInst.toFixed(2))
           });
@@ -623,7 +748,7 @@ export default function Dashboard() {
       // Adjust last installment for rounding errors
       const currentSum = newInstallments.reduce((acc, curr) => acc + curr.originalAmount, 0);
       const diff = amount - currentSum;
-      if (diff !== 0) {
+      if (Math.abs(diff) > 0.001) {
           newInstallments[newInstallments.length - 1].originalAmount += diff;
       }
 
@@ -758,6 +883,13 @@ export default function Dashboard() {
       });
   };
 
+  const handleResetData = () => {
+    if (confirm('Tem certeza? Isso apagará todos os dados salvos e restaurará os contratos de exemplo.')) {
+        localStorage.removeItem('agrofinance_contracts');
+        setContracts(INITIAL_CONTRACTS);
+    }
+  };
+
   const executeDelete = () => {
     if (confirmation.type === 'contract' && confirmation.id) {
         setContracts(contracts.filter(c => c.id !== confirmation.id));
@@ -808,7 +940,13 @@ export default function Dashboard() {
   };
 
   const getDaysRemaining = (dueDate: string) => {
-      const diff = new Date(dueDate).getTime() - new Date().getTime();
+      // Create date using split to allow simple comparison without timezone shifting
+      const [y, m, d] = dueDate.split('-').map(Number);
+      const due = new Date(y, m-1, d);
+      const today = new Date();
+      today.setHours(0,0,0,0);
+      
+      const diff = due.getTime() - today.getTime();
       return Math.ceil(diff / (1000 * 3600 * 24));
   };
   
@@ -829,13 +967,14 @@ export default function Dashboard() {
       const totalPaid = contract.paidAmount;
       const coverage = totalPaid - prevInstallments;
 
-      if (coverage >= inst.originalAmount) return 'paid';
-      if (coverage > 0) return 'partial';
+      if (coverage >= inst.originalAmount - 0.01) return 'paid';
+      if (coverage > 0.01) return 'partial';
       return 'pending';
   };
 
   return (
     <div className="min-h-screen bg-slate-50 pb-20 font-sans">
+
       {/* Top Navigation */}
       <nav className="bg-white border-b border-slate-200 px-6 py-4 sticky top-0 z-10 shadow-sm">
         <div className="max-w-7xl mx-auto flex flex-col md:flex-row justify-between items-center gap-4">
@@ -887,6 +1026,41 @@ export default function Dashboard() {
                     <p className="text-[10px] uppercase tracking-wider text-slate-400 font-bold">Taxa CDI Hoje</p>
                     <p className="text-sm font-bold text-slate-700">{currentCDI}% a.a.</p>
                 </div>
+
+                {/* Cloud Sync Status Indicator */}
+                <div 
+                    className={`flex items-center px-3 py-1.5 rounded-full text-xs font-medium border transition-colors duration-300
+                    ${syncStatus === 'synced' ? 'bg-emerald-50 text-emerald-700 border-emerald-100' : 
+                      syncStatus === 'syncing' ? 'bg-blue-50 text-blue-700 border-blue-100' :
+                      syncStatus === 'error' ? 'bg-red-50 text-red-700 border-red-100' :
+                      'bg-slate-100 text-slate-500 border-slate-200'}`}
+                    title={
+                        syncStatus === 'synced' ? 'Dados sincronizados na nuvem' :
+                        syncStatus === 'syncing' ? 'Salvando alterações...' :
+                        syncStatus === 'error' ? 'Erro ao salvar. Verifique a chave API.' :
+                        'Modo Offline (Local)'
+                    }
+                >
+                    {syncStatus === 'synced' && <Cloud size={14} className="mr-1.5" />}
+                    {syncStatus === 'syncing' && <Loader2 size={14} className="mr-1.5 animate-spin" />}
+                    {syncStatus === 'error' && <CloudOff size={14} className="mr-1.5" />}
+                    {syncStatus === 'local' && <Save size={14} className="mr-1.5" />}
+                    
+                    <span className="hidden sm:inline">
+                        {syncStatus === 'synced' ? 'Salvo' :
+                         syncStatus === 'syncing' ? 'Salvando' :
+                         syncStatus === 'error' ? 'Erro Sync' :
+                         'Offline'}
+                    </span>
+                </div>
+
+                <button 
+                    onClick={handleResetData}
+                    className="p-2 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition"
+                    title="Restaurar dados de exemplo (Apaga alterações locais)"
+                >
+                    <RotateCcw size={20} />
+                </button>
                 <button 
                     onClick={handleOpenNewContract}
                     className="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2.5 rounded-xl flex items-center shadow-lg shadow-emerald-200 transition-all active:scale-95"
@@ -1215,7 +1389,13 @@ export default function Dashboard() {
                                                     <p className="text-[10px] text-slate-400 uppercase font-bold">Vencimento</p>
                                                     <p className="text-sm font-semibold text-slate-700 flex items-center">
                                                         <Calendar size={14} className="mr-1 text-slate-400"/>
-                                                        {new Date(contract.dueDate).toLocaleDateString('pt-BR')}
+                                                        {
+                                                            // Safe date formatting
+                                                            (() => {
+                                                                const [y, m, d] = contract.dueDate.split('-').map(Number);
+                                                                return new Date(y, m-1, d).toLocaleDateString('pt-BR');
+                                                            })()
+                                                        }
                                                     </p>
                                                     <p className={`text-[10px] ${daysRemaining < 30 && status !== 'liquidado' ? 'text-orange-500 font-bold' : 'text-slate-400'}`}>
                                                         {status === 'liquidado' ? 'Finalizado' : `${daysRemaining} dias restantes`}
@@ -1319,7 +1499,12 @@ export default function Dashboard() {
                                                         : `${contract.annualRate}% ${contract.indexName}`}
                                             </td>
                                             <td className="p-4 text-sm text-slate-600">
-                                                {new Date(contract.dueDate).toLocaleDateString('pt-BR')}
+                                                {
+                                                    (() => {
+                                                        const [y, m, d] = contract.dueDate.split('-').map(Number);
+                                                        return new Date(y, m-1, d).toLocaleDateString('pt-BR');
+                                                    })()
+                                                }
                                             </td>
                                             <td className="p-4 text-right flex justify-end gap-2">
                                                 <button 
@@ -1417,12 +1602,12 @@ export default function Dashboard() {
                      <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 flex flex-col justify-between relative overflow-hidden">
                          <div className="absolute top-0 right-0 w-20 h-20 bg-purple-50 rounded-bl-full -mr-4 -mt-4"></div>
                         <div>
-                            <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Total Projetado</p>
+                            <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Dívida Total</p>
                             <h4 className="text-2xl font-bold text-slate-800 mt-1">{formatCurrency(projectionStats.totalFuture)}</h4>
                         </div>
                          <div className="mt-4 flex items-center text-xs text-purple-600 font-medium bg-purple-50 w-fit px-2 py-1 rounded-md">
                             <TrendingUp size={12} className="mr-1" />
-                            Fluxo Futuro
+                            Saldo Devedor Atual
                         </div>
                     </div>
                 </div>
@@ -1542,41 +1727,83 @@ export default function Dashboard() {
                     </div>
                 </div>
 
+                {/* New Bar Chart for Monthly Payments */}
                 <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
                     <h3 className="text-lg font-bold text-slate-800 mb-6 flex items-center justify-between">
                         <div className="flex items-center">
-                            <CalendarRange size={20} className="mr-2 text-emerald-600" />
-                            Fluxo de Caixa Projetado (Visão Geral)
+                            <BarChart3 size={20} className="mr-2 text-emerald-600" />
+                            Cronograma de Pagamentos Mensais
                         </div>
-                        <span className="text-xs font-normal text-slate-400">Mensal vs Acumulado</span>
+                        <span className="text-xs font-normal text-slate-400">Volume de amortização por mês</span>
                     </h3>
-
-                    {/* Cash Flow Chart */}
-                    {cashFlowChartData.length > 0 && (
-                        <div className="mb-6 h-72 w-full">
+                    {monthlyPaymentChartData.length > 0 && (
+                        <div className="h-72 w-full">
                             <ResponsiveContainer width="100%" height="100%">
-                                <ComposedChart data={cashFlowChartData} margin={{ top: 10, right: 30, left: 10, bottom: 0 }}>
-                                    <defs>
-                                        <linearGradient id="colorAmount" x1="0" y1="0" x2="0" y2="1">
-                                            <stop offset="5%" stopColor="#10B981" stopOpacity={0.8}/>
-                                            <stop offset="95%" stopColor="#10B981" stopOpacity={0.1}/>
-                                        </linearGradient>
-                                    </defs>
+                                <BarChart data={monthlyPaymentChartData} margin={{ top: 10, right: 30, left: 10, bottom: 0 }}>
                                     <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#E2E8F0" />
-                                    <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{fill: '#64748B', fontSize: 12}} dy={10} />
+                                    <XAxis 
+                                        dataKey="name" 
+                                        axisLine={false} 
+                                        tickLine={false} 
+                                        tick={{fill: '#64748B', fontSize: 12}} 
+                                        dy={10} 
+                                    />
                                     <YAxis 
-                                        yAxisId="left"
                                         axisLine={false} 
                                         tickLine={false} 
                                         tick={{fill: '#64748B', fontSize: 12}} 
                                         tickFormatter={(value) => `R$${(value / 1000).toFixed(0)}k`} 
                                     />
+                                    <Tooltip 
+                                        cursor={{fill: '#F1F5F9'}}
+                                        content={({ active, payload, label }) => {
+                                            if (active && payload && payload.length) {
+                                                const data = payload[0].payload;
+                                                return (
+                                                    <div className="bg-white p-3 rounded-xl shadow-lg border border-slate-100">
+                                                        <p className="text-xs font-semibold text-slate-500 mb-1">{data.fullDate}</p>
+                                                        <p className="text-lg font-bold text-emerald-700">
+                                                            {formatCurrency(payload[0].value as number)}
+                                                        </p>
+                                                    </div>
+                                                );
+                                            }
+                                            return null;
+                                        }}
+                                    />
+                                    <Bar dataKey="amount" fill="#10B981" radius={[4, 4, 0, 0]} barSize={40} />
+                                </BarChart>
+                            </ResponsiveContainer>
+                        </div>
+                    )}
+                </div>
+
+                <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
+                    <h3 className="text-lg font-bold text-slate-800 mb-6 flex items-center justify-between">
+                        <div className="flex items-center">
+                            <TrendingDown size={20} className="mr-2 text-emerald-600" />
+                            Saldo Devedor Projetado (Run-off)
+                        </div>
+                        <span className="text-xs font-normal text-slate-400">Evolução do Saldo Devedor</span>
+                    </h3>
+
+                    {/* Cash Flow Chart - Updated to be Outstanding Balance decreasing */}
+                    {cashFlowChartData.length > 0 && (
+                        <div className="mb-6 h-72 w-full">
+                            <ResponsiveContainer width="100%" height="100%">
+                                <AreaChart data={cashFlowChartData} margin={{ top: 10, right: 30, left: 10, bottom: 0 }}>
+                                    <defs>
+                                        <linearGradient id="colorBalance" x1="0" y1="0" x2="0" y2="1">
+                                            <stop offset="5%" stopColor="#EF4444" stopOpacity={0.8}/>
+                                            <stop offset="95%" stopColor="#EF4444" stopOpacity={0.1}/>
+                                        </linearGradient>
+                                    </defs>
+                                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#E2E8F0" />
+                                    <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{fill: '#64748B', fontSize: 12}} dy={10} />
                                     <YAxis 
-                                        yAxisId="right"
-                                        orientation="right"
                                         axisLine={false} 
                                         tickLine={false} 
-                                        tick={{fill: '#94A3B8', fontSize: 10}} 
+                                        tick={{fill: '#64748B', fontSize: 12}} 
                                         tickFormatter={(value) => `R$${(value / 1000).toFixed(0)}k`} 
                                     />
                                     <Tooltip 
@@ -1589,12 +1816,12 @@ export default function Dashboard() {
                                                         <p className="text-xs font-semibold text-slate-500 mb-2">{data.fullDate}</p>
                                                         <div className="flex flex-col gap-1">
                                                             <div className="flex justify-between gap-4">
-                                                                <span className="text-xs text-slate-400">Mensal:</span>
+                                                                <span className="text-xs text-slate-400">Pagamento Mês:</span>
                                                                 <span className="text-sm font-bold text-emerald-600">{formatCurrency(data.amount)}</span>
                                                             </div>
                                                             <div className="flex justify-between gap-4">
-                                                                <span className="text-xs text-slate-400">Acumulado:</span>
-                                                                <span className="text-sm font-bold text-blue-600">{formatCurrency(data.accumulated)}</span>
+                                                                <span className="text-xs text-slate-400">Saldo Restante:</span>
+                                                                <span className="text-sm font-bold text-red-600">{formatCurrency(data.balance)}</span>
                                                             </div>
                                                         </div>
                                                     </div>
@@ -1603,9 +1830,16 @@ export default function Dashboard() {
                                             return null;
                                         }}
                                     />
-                                    <Bar yAxisId="left" dataKey="amount" fill="url(#colorAmount)" radius={[4, 4, 0, 0]} barSize={40} />
-                                    <Line yAxisId="right" type="monotone" dataKey="accumulated" stroke="#3B82F6" strokeWidth={2} dot={{r: 3, fill: '#3B82F6'}} />
-                                </ComposedChart>
+                                    <Area 
+                                        type="monotone" 
+                                        dataKey="balance" 
+                                        stroke="#EF4444" 
+                                        fillOpacity={1} 
+                                        fill="url(#colorBalance)" 
+                                        strokeWidth={2}
+                                        name="Saldo Devedor"
+                                    />
+                                </AreaChart>
                             </ResponsiveContainer>
                         </div>
                     )}
@@ -1973,7 +2207,10 @@ export default function Dashboard() {
                                             <tr key={inst.id} className="hover:bg-slate-50">
                                                 <td className="p-3 text-sm text-slate-400 font-medium text-center">{inst.number}</td>
                                                 <td className="p-3 text-sm text-slate-700">
-                                                    {new Date(inst.dueDate).toLocaleDateString('pt-BR')}
+                                                    {(() => {
+                                                        const [y, m, d] = inst.dueDate.split('-').map(Number);
+                                                        return new Date(y, m-1, d).toLocaleDateString('pt-BR');
+                                                    })()}
                                                 </td>
                                                 <td className="p-3 text-sm font-medium text-slate-700 text-right">
                                                     {formatCurrency(inst.originalAmount)}
